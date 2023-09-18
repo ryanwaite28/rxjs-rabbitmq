@@ -4,6 +4,8 @@
   "description": "RxJS powered RabbitMQ event handling",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "deprecated": false,
+  "homepage": "https://github.com/ryanwaite28/rxjs-rabbitmq",
   "scripts": {
     "tsc": "tsc",
     "build": "tsc",
@@ -27,5 +29,9 @@
     "RxJS",
     "RabbitMQ",
     "amqplib"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryanwaite28/rxjs-rabbitmq.git"
+  }
 }
