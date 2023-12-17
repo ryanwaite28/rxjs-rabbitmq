@@ -4,16 +4,34 @@ import {
   Message  
 } from "amqplib";
 
+/* 
+    
+  */
 
 
 export type MapType<T = any> = { [key:string]: T };
 
 
 export type RmqMessageTypeHandler = (event: RmqEventMessage) => Promise<void>;
-export type RmqHandleMessageTypeConfig = { messageType: string, callbackHandler: RmqMessageTypeHandler };
+export type RmqHandleMessageTypeConfig = { messageName: string, callbackHandler: RmqMessageTypeHandler };
 export type RmqHandleMessageTypeConfigs = string[] | RmqHandleMessageTypeConfig[];
 
-export interface QueueConfig { name: string, handleMessageTypes: RmqHandleMessageTypeConfigs, options?: Options.AssertQueue }
+export interface QueueConfig {
+  /* 
+    The name of the queue you want to consume messages from
+  */
+  name: string,
+
+  /* 
+    the event names 
+  */
+  handleMessageTypes: RmqHandleMessageTypeConfigs,
+
+  /* 
+    
+  */
+  options?: Options.AssertQueue
+}
 export interface ExchangeConfig { name: string, type: string, options?: Options.AssertExchange }
 export interface QueueExchangeBindingConfig { queue: string, exchange: string, routingKey: string }
 
@@ -58,6 +76,10 @@ export type RabbitMqInitConfig = {
   retryAttempts: number,
   retryDelay: number
   prefetch?: number,
+
+  /**
+    The queues you want to consume on this client 
+  */
   queues: Array<QueueConfig>,
   exchanges: Array<ExchangeConfig>,
   bindings: Array<QueueExchangeBindingConfig>,

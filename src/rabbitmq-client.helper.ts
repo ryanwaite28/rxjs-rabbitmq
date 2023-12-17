@@ -46,9 +46,11 @@ import { ContentTypes } from "./enums";
 
 
 
+export type RmgOnEventHandler = (event: RmqEventMessage, rmqClient?: RabbitMQClient) => void;
 
-
-
+/**
+  Rabbit MQ - RxJS Powered
+*/
 export class RabbitMQClient {
   private clientInitConfig: RabbitMqInitConfig;
 
@@ -58,6 +60,8 @@ export class RabbitMQClient {
   private isReadyStream: BehaviorSubject<boolean> = new BehaviorSubject<boolean>(this.isReady);
   private connectionErrorStream: Subject<any> = new Subject<any>();
   private connectionCloseStream: Subject<any> = new Subject<any>();
+  
+  private messagesStream: Subject<RmqEventMessage> = new Subject<RmqEventMessage>();
 
   private queues: MapType<Replies.AssertQueue> = {};
   private exchanges:MapType<Replies.AssertExchange> = {};
@@ -89,6 +93,10 @@ export class RabbitMQClient {
 
   get onConnectionClose(): Observable<any> {
     return this.connectionCloseStream.asObservable();
+  }
+
+  get onMessage(): Observable<RmqEventMessage> {
+    return this.messagesStream.asObservable();
   }
 
   constructor(clientInitConfig: RabbitMqInitConfig) {
@@ -145,22 +153,20 @@ export class RabbitMQClient {
 
             queueListenersMap[this.DEFAULT_LISTENER_TYPE] = new ReplaySubject();
 
-            const isStringList = typeof queueConfig.handleMessageTypes[0] === 'string';
-            if (isStringList) {
-              for (const messageType of queueConfig.handleMessageTypes) {
+            for (const messageType of queueConfig.handleMessageTypes) {
+              const isStringList = typeof messageType === 'string';
+
+              if (isStringList) {
                 queueListenersMap[messageType as string] = new ReplaySubject();
               }
-            }
-            else {
-              for (const messageType of queueConfig.handleMessageTypes) {
-                const config: RmqHandleMessageTypeConfig = (messageType as any) as RmqHandleMessageTypeConfig;
-                queueCallbacksMap[config.messageType] = config.callbackHandler;
+              else {
+                queueCallbacksMap[messageType.messageName] = messageType.callbackHandler;
               }
-              this.onQueue(queueConfig.name);
             }
 
             promises.push(this.channel.assertQueue(queueConfig.name, queueConfig.options));
           }
+
           return Promise.all(promises).then((values) => {
             this.queues = mapify(values, 'queue');
             console.log(`queues created on channel`);
@@ -233,78 +239,89 @@ export class RabbitMQClient {
     return this.onReady.pipe(map(() => this.channel));
   }
 
+  private getQueueListener(queue: string, options?: Options.Consume) {
+    return () => {
+      const handleCallback = (message: ConsumeMessage | null) => {
+        if (!message) {
+          throw new Error('Consumer cancelled by server');
+        }
+
+        console.log(`received queue message`, message);
+        
+        // see if a listener was created for the routing key
+        const messageType = message.properties.type;
+        const useContentType = message.properties.contentType;
+        const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].deserialize(message.content) : message.content;
+        const messageObj: RmqEventMessage = {
+          data: useData,
+          message,
+          ack: () => {
+            this.ack(message);
+          },
+          sendMessage: this.sendMessage.bind(this),
+          sendRequest: this.sendRequest.bind(this),
+          publishEvent: this.publishEvent.bind(this),
+        };
+
+        // send message to stream
+        this.messagesStream.next(messageObj);
+        
+        // console.log(`Message on queue ${queue}:`, messageObj);
+
+        if (!messageType) {
+          // no type key found, push to default stream
+          console.log(`No message type found; pushing to default handler on queue ${queue}`);
+          this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
+          return;
+        }
+
+        if (this.queueToEventHandleMapping[queue][messageType]) {
+          // there is a registered listener for the type, push to that stream
+          console.log(`message type handler found; pushing to ${messageType} handler on queue ${queue}`);
+          this.queueToEventHandleMapping[queue][messageType].next(messageObj);
+        }
+        else if (this.queueToEventCallbackMapping[queue][messageType]) {
+          // there is a registered listener for the type, push to that stream
+          console.log(`message type callback found; pushing to ${messageType} callback on queue ${queue}`);
+          const callbackHandler = this.queueToEventCallbackMapping[queue][messageType];
+          callbackHandler(messageObj);
+        }
+        else {
+          // no registered listener
+          if (this.clientInitConfig.autoAckUnhandledMessageTypes) {
+            console.log(`No handler found for message type ${messageType} on queue ${queue}; auto acknowledging.`);
+            this.ack(message);
+            return;
+          }
+          else if (this.clientInitConfig.pushUnhandledMessageTypesToDefaultHandler) {
+            console.log(`No handler found for message type ${messageType} on queue ${queue}; pushing to ${this.DEFAULT_LISTENER_TYPE} handler.`);
+            this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
+            return;
+          }
+          else {
+            throw new Error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
+          }
+        }
+      };
+
+      const consumerTag = Date.now().toString();
+
+      this.channel.consume(queue, handleCallback, { ...(options || {}), consumerTag: options?.consumerTag || consumerTag });
+    }
+  }
+
   onQueue(queue: string, options?: Options.Consume) {
     // listen for messages on the queue
     if (!this.queueListeners[queue]) {
       console.log(`Registering messages/events listener for queue ${queue}:`);
-      const startQueueListener = () => {
-        const handleCallback = (message: ConsumeMessage | null) => {
-          if (!message) {
-            throw new Error('Consumer cancelled by server');
-          }
+      const startQueueListener = this.getQueueListener(queue, options);
 
-          console.log(`received queue message`, message);
-          
-          // see if a listener was created for the routing key
-          const messageType = message.properties.type;
-          const useContentType = message.properties.contentType;
-          const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].deserialize(message.content) : message.content;
-          const messageObj: RmqEventMessage = {
-            data: useData,
-            message,
-            ack: () => {
-              this.ack(message);
-            },
-            sendMessage: this.sendMessage.bind(this),
-            sendRequest: this.sendRequest.bind(this),
-            publishEvent: this.publishEvent.bind(this),
-          };
-          
-          // console.log(`Message on queue ${queue}:`, messageObj);
-
-          if (!messageType) {
-            // no type key found, push to default stream
-            console.log(`No message type found; pushing to default handler on queue ${queue}`);
-            this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
-          }
-          else {
-            // type key found
-            if (this.queueToEventHandleMapping[queue][messageType]) {
-              // there is a registered listener for the type, push to that stream
-              console.log(`message type handler found; pushing to ${messageType} handler on queue ${queue}`);
-              this.queueToEventHandleMapping[queue][messageType].next(messageObj);
-            }
-            else if (this.queueToEventCallbackMapping[queue][messageType]) {
-              // there is a registered listener for the type, push to that stream
-              console.log(`message type callback found; pushing to ${messageType} callback on queue ${queue}`);
-              const callbackHandler = this.queueToEventCallbackMapping[queue][messageType];
-              callbackHandler(messageObj);
-            }
-            else {
-              // no registered listener
-              if (this.clientInitConfig.autoAckUnhandledMessageTypes) {
-                console.log(`No handler found for message type ${messageType} on queue ${queue}; auto acknowledging.`);
-                this.ack(message);
-                return;
-              }
-              else if (this.clientInitConfig.pushUnhandledMessageTypesToDefaultHandler) {
-                console.log(`No handler found for message type ${messageType} on queue ${queue}; pushing to ${this.DEFAULT_LISTENER_TYPE} handler.`);
-                this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
-                return;
-              }
-              else {
-                throw new Error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
-              }
-            }
-          }
-        };
-
-        const consumerTag = Date.now().toString();
-  
-        this.channel.consume(queue, handleCallback, { ...(options || {}), consumerTag: options?.consumerTag || consumerTag });
-      }
-
-      this.queueListeners[queue] = this.onReady.pipe(tap((readyState) => startQueueListener())).subscribe({
+      this.queueListeners[queue] = this.onReady.pipe(
+        tap((readyState) => {
+          startQueueListener()
+        })
+      )
+      .subscribe({
         next: (readyState) => {
           console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
         }
@@ -328,9 +345,25 @@ export class RabbitMQClient {
       );
     };
 
+    const onEvent = (messageType: string, handlerFn: RmgOnEventHandler) => {
+      return this.onReady.pipe(
+        map((ready: boolean) => {
+          if (!this.queueToEventCallbackMapping[queue][messageType]) {
+            throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
+          }
+          return this.queueToEventHandleMapping[queue][messageType].asObservable().subscribe({
+            next: (event) => {
+              handlerFn(event, this);
+            }
+          });
+        })
+      );
+    };
+
     return {
       handle,
-      handleDefault
+      handleDefault,
+      onEvent
     };
   }
 
