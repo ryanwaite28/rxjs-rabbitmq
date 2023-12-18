@@ -34,6 +34,7 @@ import {
   MapType,
   QueueExchangeBindingConfig,
   RabbitMqInitConfig,
+  RmqEventHandler,
   RmqEventMessage,
   RmqHandleMessageTypeConfig,
   RmqMessageTypeHandler,
@@ -363,25 +364,18 @@ export class RabbitMQClient {
       );
     };
 
-    const onEvent = (messageType: string, handlerFn: RmgOnEventHandler) => {
-      return this.onReady.pipe(
-        map((ready: boolean) => {
-          if (!this.queueToEventCallbackMapping[queue][messageType]) {
-            throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
-          }
-          return this.queueToEventHandleMapping[queue][messageType].asObservable().subscribe({
-            next: (event) => {
-              handlerFn(event, this);
-            }
-          });
-        })
-      );
+    const onEvent = (messageType: string, handler: RmqEventHandler) => {
+      return this.messagesStreamsByQueue[queue]
+      .asObservable()
+      .pipe(filter(() => this.isReady))
+      .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
+      .subscribe({ next: handler });
     };
 
     return {
       handle,
       handleDefault,
-      onEvent
+      onEvent,
     };
   }
 
@@ -503,7 +497,7 @@ export class RabbitMQClient {
       const { data, routingKey, publishOptions, exchange } = options;
       const useContentType = publishOptions.contentType || ContentTypes.TEXT;
       const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
-      this.channel.publish(exchange, routingKey, useData, { ...publishOptions, appId: publishOptions.appId });
+      this.channel.publish(exchange, routingKey || '', useData, { ...publishOptions, appId: publishOptions.appId });
 
       if (publishOptions.replyTo && !this.clientInitConfig.dontSendToReplyQueueOnPublish) {
         console.log(`sending copy to reply to queue ${publishOptions.replyTo}...`);
@@ -526,12 +520,12 @@ export class RabbitMQClient {
     }
   }
 
-  listen() {
-    // last resort to keeping the node.js process running
-    const listenerCallback = () => {
-      console.log(`--- listening... ---`);
-    };
-    const interval = setInterval(listenerCallback, 1000 * 60 * 10);
-    return interval;
-  }
+  // listen() {
+  //   // last resort to keeping the node.js process running
+  //   const listenerCallback = () => {
+  //     console.log(`--- listening... ---`);
+  //   };
+  //   const interval = setInterval(listenerCallback, 1000 * 60 * 10);
+  //   return interval;
+  // }
 }

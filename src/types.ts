@@ -115,7 +115,7 @@ export type RmqSendRequestParams = {
 export type RmqPublishEventParams<T = any> = {
   exchange: string,
   data: T,
-  routingKey: string,
+  routingKey?: string,
   publishOptions: Options.Publish
 }
 
@@ -127,6 +127,8 @@ export type RmqEventMessage<T = any> = {
   sendMessage: (options: RmqSendMessageParams) => void,
   sendRequest: <T = any> (options: RmqSendRequestParams) => Promise<RmqEventMessage<T>>,
 };
+
+export type RmqEventHandler = (event: RmqEventMessage) => Promise<void>;
 
 export type AckFn = (message: Message) => void;
 

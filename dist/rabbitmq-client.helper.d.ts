@@ -1,7 +1,6 @@
-/// <reference types="node" />
 import { Connection, Channel, Options, ConsumeMessage } from "amqplib";
 import { Observable, Subscription } from "rxjs";
-import { RabbitMqInitConfig, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams } from "./types";
+import { RabbitMqInitConfig, RmqEventHandler, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams } from "./types";
 export type RmgOnEventHandler = (event: RmqEventMessage, rmqClient?: RabbitMQClient) => void;
 /**
   Rabbit MQ - RxJS Powered
@@ -37,7 +36,7 @@ export declare class RabbitMQClient {
     onQueue(queue: string, options?: Options.Consume): {
         handle: (messageType: string) => Observable<RmqEventMessage>;
         handleDefault: () => Observable<RmqEventMessage>;
-        onEvent: (messageType: string, handlerFn: RmgOnEventHandler) => Observable<Subscription>;
+        onEvent: (messageType: string, handler: RmqEventHandler) => Subscription;
     };
     forQueue(queue: string, options?: Options.Consume): Observable<RmqEventMessage>;
     ack(message: ConsumeMessage): void;
@@ -48,5 +47,4 @@ export declare class RabbitMQClient {
         publishOptions: Options.Publish;
     }): Promise<RmqEventMessage<T>>;
     publishEvent(options: RmqPublishEventParams): void;
-    listen(): NodeJS.Timeout;
 }
