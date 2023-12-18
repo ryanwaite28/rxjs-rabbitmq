@@ -4,6 +4,13 @@ export enum ContentTypes {
   STREAM = 'application/octet-stream'
 }
 
+export enum ExchangeTypes {
+  DIRECT = 'direct',
+  TOPIC = 'topic',
+  HEADERS = 'headers',
+  FANOUT = 'fanout',
+}
+
 export enum MimeTypes {
   AAC = "audio/aac",
   ABW = "application/x-abiword",

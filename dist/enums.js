@@ -4,6 +4,13 @@ export var ContentTypes;
     ContentTypes["TEXT"] = "text/plain";
     ContentTypes["STREAM"] = "application/octet-stream";
 })(ContentTypes || (ContentTypes = {}));
+export var ExchangeTypes;
+(function (ExchangeTypes) {
+    ExchangeTypes["DIRECT"] = "direct";
+    ExchangeTypes["TOPIC"] = "topic";
+    ExchangeTypes["HEADERS"] = "headers";
+    ExchangeTypes["FANOUT"] = "fanout";
+})(ExchangeTypes || (ExchangeTypes = {}));
 export var MimeTypes;
 (function (MimeTypes) {
     MimeTypes["AAC"] = "audio/aac";

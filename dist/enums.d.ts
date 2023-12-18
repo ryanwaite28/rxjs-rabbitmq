@@ -3,6 +3,12 @@ export declare enum ContentTypes {
     TEXT = "text/plain",
     STREAM = "application/octet-stream"
 }
+export declare enum ExchangeTypes {
+    DIRECT = "direct",
+    TOPIC = "topic",
+    HEADERS = "headers",
+    FANOUT = "fanout"
+}
 export declare enum MimeTypes {
     AAC = "audio/aac",
     ABW = "application/x-abiword",
