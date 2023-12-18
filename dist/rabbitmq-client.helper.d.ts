@@ -15,6 +15,7 @@ export declare class RabbitMQClient {
     private connectionErrorStream;
     private connectionCloseStream;
     private messagesStream;
+    private messagesStreamsByQueue;
     private queues;
     private exchanges;
     private bindings;
@@ -32,11 +33,13 @@ export declare class RabbitMQClient {
     getConnection(): Observable<Connection>;
     getChannel(): Observable<Channel>;
     private getQueueListener;
+    private listenToQueue;
     onQueue(queue: string, options?: Options.Consume): {
         handle: (messageType: string) => Observable<RmqEventMessage>;
         handleDefault: () => Observable<RmqEventMessage>;
         onEvent: (messageType: string, handlerFn: RmgOnEventHandler) => Observable<Subscription>;
     };
+    forQueue(queue: string, options?: Options.Consume): Observable<RmqEventMessage>;
     ack(message: ConsumeMessage): void;
     sendMessage(options: RmqSendMessageParams): Promise<unknown>;
     sendRequest<T = any>(options: {

@@ -10,7 +10,7 @@ export type RmqHandleMessageTypeConfig = {
 export type RmqHandleMessageTypeConfigs = string[] | RmqHandleMessageTypeConfig[];
 export interface QueueConfig {
     name: string;
-    handleMessageTypes: RmqHandleMessageTypeConfigs;
+    handleMessageTypes?: RmqHandleMessageTypeConfigs;
     options?: Options.AssertQueue;
 }
 export interface ExchangeConfig {
@@ -50,6 +50,7 @@ export type RmqEventMessage<T = any> = {
 };
 export type AckFn = (message: Message) => void;
 export type RabbitMqInitConfig = {
+    stopAutoInit: boolean;
     dontSendToReplyQueueOnPublish?: boolean;
     autoAckUnhandledMessageTypes?: boolean;
     pushUnhandledMessageTypesToDefaultHandler?: boolean;

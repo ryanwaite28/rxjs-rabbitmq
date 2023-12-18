@@ -33,7 +33,11 @@ export class RabbitMQClient {
         this.isReadyStream = new BehaviorSubject(this.isReady);
         this.connectionErrorStream = new Subject();
         this.connectionCloseStream = new Subject();
+        /*
+          Handle all messages from all queues on this client
+        */
         this.messagesStream = new Subject();
+        this.messagesStreamsByQueue = {};
         this.queues = {};
         this.exchanges = {};
         this.bindings = [];
@@ -42,7 +46,7 @@ export class RabbitMQClient {
         this.queueListeners = {};
         this.queueToEventHandleMapping = {};
         this.queueToEventCallbackMapping = {};
-        this.init(clientInitConfig);
+        !clientInitConfig.stopAutoInit && this.init(clientInitConfig);
     }
     init(clientInitConfig) {
         this.clientInitConfig = clientInitConfig;
@@ -50,20 +54,23 @@ export class RabbitMQClient {
         let retryAttempts = clientInitConfig.retryAttempts || 0;
         const retryDelay = clientInitConfig.retryDelay || 0;
         const init = () => {
+            // creating connection
             console.log(`Attempting connection to Rabbit MQ...`);
             return connect(connection_url)
                 .then((connection) => {
                 this.connection = connection;
-                console.log(`connected to message server`);
+                console.log(`Connected to message server`);
                 return this.connection.createChannel();
             })
+                // creating channel
                 .then((channel) => {
                 this.channel = channel;
                 if (prefetch) {
                     this.channel.prefetch(prefetch || 1);
                 }
-                console.log(`channel created on message server`);
+                console.log(`Channel created on message server`);
             })
+                // creating exclusive queue
                 .then(() => {
                 // create an exclusive queue for this channel connection
                 console.log(`Creating exclusive queue ${this.EXCLUSIVE_QUEUE}`);
@@ -71,22 +78,25 @@ export class RabbitMQClient {
                     console.log(`Created exclusive queue ${this.EXCLUSIVE_QUEUE}`);
                 });
             })
+                // assert to queues
                 .then(() => {
                 const promises = [];
-                // by default, create an observable stream on the queue for unidentified/null routing keys
                 for (const queueConfig of queues) {
                     this.queueToEventHandleMapping[queueConfig.name] = {};
                     this.queueToEventCallbackMapping[queueConfig.name] = {};
                     const queueListenersMap = this.queueToEventHandleMapping[queueConfig.name];
                     const queueCallbacksMap = this.queueToEventCallbackMapping[queueConfig.name];
+                    // by default, create an observable stream on the queue for unidentified/null routing keys
                     queueListenersMap[this.DEFAULT_LISTENER_TYPE] = new ReplaySubject();
-                    for (const messageType of queueConfig.handleMessageTypes) {
+                    const useHandleMessageTypes = queueConfig.handleMessageTypes || [];
+                    for (const messageType of useHandleMessageTypes) {
                         const isStringList = typeof messageType === 'string';
                         if (isStringList) {
                             queueListenersMap[messageType] = new ReplaySubject();
                         }
                         else {
-                            queueCallbacksMap[messageType.messageName] = messageType.callbackHandler;
+                            const config = messageType;
+                            queueCallbacksMap[config.messageName] = config.callbackHandler;
                         }
                     }
                     promises.push(this.channel.assertQueue(queueConfig.name, queueConfig.options));
@@ -96,6 +106,7 @@ export class RabbitMQClient {
                     console.log(`queues created on channel`);
                 });
             })
+                // assert exchanges
                 .then(() => {
                 const promises = exchanges.map((config) => this.channel.assertExchange(config.name, config.type, config.options));
                 return Promise.all(promises).then(values => {
@@ -103,6 +114,7 @@ export class RabbitMQClient {
                     console.log(`exchanges created on channel`);
                 });
             })
+                // apply bindings
                 .then(() => {
                 const promises = bindings.map((config) => this.channel.bindQueue(config.queue, config.exchange, config.routingKey));
                 // bind the exclusive queue to all the exchanges
@@ -158,6 +170,7 @@ export class RabbitMQClient {
     getQueueListener(queue, options) {
         return () => {
             const handleCallback = (message) => {
+                var _a;
                 if (!message) {
                     throw new Error('Consumer cancelled by server');
                 }
@@ -176,8 +189,10 @@ export class RabbitMQClient {
                     sendRequest: this.sendRequest.bind(this),
                     publishEvent: this.publishEvent.bind(this),
                 };
-                // send message to stream
+                // send message to general stream
                 this.messagesStream.next(messageObj);
+                // send message to queue stream
+                (_a = this.messagesStreamsByQueue[queue]) === null || _a === void 0 ? void 0 : _a.next(messageObj);
                 // console.log(`Message on queue ${queue}:`, messageObj);
                 if (!messageType) {
                     // no type key found, push to default stream
@@ -213,24 +228,29 @@ export class RabbitMQClient {
                     }
                 }
             };
-            const consumerTag = Date.now().toString();
-            this.channel.consume(queue, handleCallback, Object.assign(Object.assign({}, (options || {})), { consumerTag: (options === null || options === void 0 ? void 0 : options.consumerTag) || consumerTag }));
+            this.channel.consume(queue, handleCallback, Object.assign({}, (options || {})));
         };
+    }
+    listenToQueue(queue, options) {
+        if (this.queueListeners[queue]) {
+            console.log(`Already Registered messages/events listener for queue: ${queue}`);
+            return;
+        }
+        console.log(`Registering messages/events listener for queue: ${queue}`);
+        const startQueueListener = this.getQueueListener(queue, options);
+        this.messagesStreamsByQueue[queue] = new Subject();
+        this.queueListeners[queue] = this.onReady.pipe(tap((readyState) => {
+            startQueueListener();
+        }))
+            .subscribe({
+            next: (readyState) => {
+                console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
+            }
+        });
     }
     onQueue(queue, options) {
         // listen for messages on the queue
-        if (!this.queueListeners[queue]) {
-            console.log(`Registering messages/events listener for queue ${queue}:`);
-            const startQueueListener = this.getQueueListener(queue, options);
-            this.queueListeners[queue] = this.onReady.pipe(tap((readyState) => {
-                startQueueListener();
-            }))
-                .subscribe({
-                next: (readyState) => {
-                    console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
-                }
-            });
-        }
+        this.listenToQueue(queue, options);
         const handle = (messageType) => {
             return this.onReady.pipe(mergeMap((ready, index) => {
                 if (!this.queueToEventHandleMapping[queue][messageType]) {
@@ -259,6 +279,10 @@ export class RabbitMQClient {
             handleDefault,
             onEvent
         };
+    }
+    forQueue(queue, options) {
+        this.listenToQueue(queue, options);
+        return this.messagesStreamsByQueue[queue].asObservable();
     }
     ack(message) {
         this.channel.ack(message);
