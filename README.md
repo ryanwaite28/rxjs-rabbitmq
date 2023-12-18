@@ -38,31 +38,32 @@ const rmqClient = new RabbitMQClient({
 });
 
 
+// Listen to all messages from a queue
+rmqClient.forQueue(MicroservicesQueues.NOTIFICATIONS).subscribe({
+  next: (event: RmqEventMessage) => {
+    const handler: RmqEventHandler = EventHandlersMap[event.message.properties.type];
+    if (!!handler && typeof (handler) === 'function') {
+      handler(event);
+    }
+  }
+});
 
+
+
+// Handle specific queue
 const emailsQueue = rmqClient.onQueue(MicroservicesQueues.EMAILS);
 
-emailsQueue.handle(EmailsQueueMessageTypes.SEND_EMAIL).subscribe({
-  next: (event: RmqEventMessage) => SEND_EMAIL(event, rmqClient)
-});
+// Handle specific message types from a queue
+emailsQueue.handle(EmailsQueueMessageTypes.SEND_EMAIL).subscribe({ next: SEND_EMAIL });
 
-emailsQueue.handle(UsersQueueEventTypes.USER_CREATED).subscribe({
-  next: (event: RmqEventMessage) => USER_CREATED(event, rmqClient)
-});
-
-emailsQueue.handle(UsersQueueEventTypes.USER_DELETED).subscribe({
-  next: (event: RmqEventMessage) => USER_DELETED(event, rmqClient)
-});
+// shorthand/auto-subscribe and handle
+emailsQueue.onEvent(EmailsQueueMessageTypes.SEND_EMAIL, SEND_EMAIL);
 
 
 
-/**
- * Send arbitrary emails via given arguments
- * 
- * @param event 
- * @param rmqClient 
- * @returns {void}
- */
-export async function SEND_EMAIL(event: RmqEventMessage, rmqClient: RabbitMQClient) {
+// event handler
+
+export async function SEND_EMAIL(event: RmqEventMessage) {
   console.log(`[${EmailsQueueMessageTypes.SEND_EMAIL}] Received message:`, { data: event.data });
 
   const sendEmailParams = event.data as SendEmailDto;
@@ -82,10 +83,9 @@ export async function SEND_EMAIL(event: RmqEventMessage, rmqClient: RabbitMQClie
     }
   };
   
-  rmqClient.ack(event.message);
+  event.ack(event.message);
   return rmqClient.publishEvent({
     exchange: MicroservicesExchanges.EMAIL_EVENTS,
-    routingKey: RoutingKeys.EVENT,
     data: serviceMethodResults,
     publishOptions: {
       type: EmailsQueueEventTypes.SENT_EMAIL,

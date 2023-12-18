@@ -252,12 +252,15 @@ export class RabbitMQClient {
 
   private getQueueListener(queue: string, options?: Options.Consume) {
     return () => {
+      // callback
       const handleCallback = (message: ConsumeMessage | null) => {
         if (!message) {
-          throw new Error('Consumer cancelled by server');
+          console.log('Consumer cancelled by server');
+          // throw new Error('Consumer cancelled by server');
+          return;
         }
 
-        console.log(`received queue message`, message);
+        console.log(`Received queue message.`, message);
         
         // see if a listener was created for the routing key
         const messageType = message.properties.type;
@@ -277,7 +280,7 @@ export class RabbitMQClient {
         // send message to general stream
         this.messagesStream.next(messageObj);
         // send message to queue stream
-        this.messagesStreamsByQueue[queue]?.next(messageObj);
+        !!this.messagesStreamsByQueue[queue] && this.messagesStreamsByQueue[queue].next(messageObj);
         
         // console.log(`Message on queue ${queue}:`, messageObj);
 
@@ -312,10 +315,11 @@ export class RabbitMQClient {
             return;
           }
           else {
-            throw new Error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
+            console.error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
           }
         }
       };
+      // END callback
 
       this.channel.consume(queue, handleCallback, { ...(options || {}) });
     }
@@ -348,14 +352,19 @@ export class RabbitMQClient {
     this.listenToQueue(queue, options);
     
     const handle = (messageType: string) => {
-      return this.onReady.pipe(
-        mergeMap((ready: boolean, index: number) => {
-          if (!this.queueToEventHandleMapping[queue][messageType]) {
-            throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
-          }
-          return this.queueToEventHandleMapping[queue][messageType].asObservable();
-        })
-      );
+      // return this.onReady.pipe(
+      //   mergeMap((ready: boolean, index: number) => {
+      //     if (!this.queueToEventHandleMapping[queue][messageType]) {
+      //       throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
+      //     }
+      //     return this.queueToEventHandleMapping[queue][messageType].asObservable();
+      //   })
+      // );
+
+      return this.messagesStreamsByQueue[queue]
+      .asObservable()
+      .pipe(filter(() => this.isReady))
+      .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
     };
 
     const handleDefault = () => {
@@ -364,6 +373,9 @@ export class RabbitMQClient {
       );
     };
 
+    /**
+      Providing callback function approach
+    */
     const onEvent = (messageType: string, handler: RmqEventHandler) => {
       return this.messagesStreamsByQueue[queue]
       .asObservable()

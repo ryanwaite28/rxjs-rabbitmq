@@ -169,12 +169,14 @@ export class RabbitMQClient {
     }
     getQueueListener(queue, options) {
         return () => {
+            // callback
             const handleCallback = (message) => {
-                var _a;
                 if (!message) {
-                    throw new Error('Consumer cancelled by server');
+                    console.log('Consumer cancelled by server');
+                    // throw new Error('Consumer cancelled by server');
+                    return;
                 }
-                console.log(`received queue message`, message);
+                console.log(`Received queue message.`, message);
                 // see if a listener was created for the routing key
                 const messageType = message.properties.type;
                 const useContentType = message.properties.contentType;
@@ -192,7 +194,7 @@ export class RabbitMQClient {
                 // send message to general stream
                 this.messagesStream.next(messageObj);
                 // send message to queue stream
-                (_a = this.messagesStreamsByQueue[queue]) === null || _a === void 0 ? void 0 : _a.next(messageObj);
+                !!this.messagesStreamsByQueue[queue] && this.messagesStreamsByQueue[queue].next(messageObj);
                 // console.log(`Message on queue ${queue}:`, messageObj);
                 if (!messageType) {
                     // no type key found, push to default stream
@@ -224,10 +226,11 @@ export class RabbitMQClient {
                         return;
                     }
                     else {
-                        throw new Error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
+                        console.error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
                     }
                 }
             };
+            // END callback
             this.channel.consume(queue, handleCallback, Object.assign({}, (options || {})));
         };
     }
@@ -252,16 +255,25 @@ export class RabbitMQClient {
         // listen for messages on the queue
         this.listenToQueue(queue, options);
         const handle = (messageType) => {
-            return this.onReady.pipe(mergeMap((ready, index) => {
-                if (!this.queueToEventHandleMapping[queue][messageType]) {
-                    throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
-                }
-                return this.queueToEventHandleMapping[queue][messageType].asObservable();
-            }));
+            // return this.onReady.pipe(
+            //   mergeMap((ready: boolean, index: number) => {
+            //     if (!this.queueToEventHandleMapping[queue][messageType]) {
+            //       throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
+            //     }
+            //     return this.queueToEventHandleMapping[queue][messageType].asObservable();
+            //   })
+            // );
+            return this.messagesStreamsByQueue[queue]
+                .asObservable()
+                .pipe(filter(() => this.isReady))
+                .pipe(filter((event) => event.message.properties.type === messageType));
         };
         const handleDefault = () => {
             return this.onReady.pipe(mergeMap((ready, index) => this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].asObservable()));
         };
+        /**
+          Providing callback function approach
+        */
         const onEvent = (messageType, handler) => {
             return this.messagesStreamsByQueue[queue]
                 .asObservable()
