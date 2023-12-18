@@ -11,7 +11,6 @@ import {
 
 export type MapType<T = any> = { [key:string]: T };
 
-
 export type RmqMessageTypeHandler = (event: RmqEventMessage) => Promise<void>;
 export type RmqHandleMessageTypeConfig = { messageName: string, callbackHandler: RmqMessageTypeHandler };
 export type RmqHandleMessageTypeConfigs = string[] | RmqHandleMessageTypeConfig[];
@@ -25,15 +24,25 @@ export interface QueueConfig {
   /* 
     the event names 
   */
-  handleMessageTypes: RmqHandleMessageTypeConfigs,
+  handleMessageTypes?: RmqHandleMessageTypeConfigs,
 
   /* 
     
   */
   options?: Options.AssertQueue
 }
-export interface ExchangeConfig { name: string, type: string, options?: Options.AssertExchange }
-export interface QueueExchangeBindingConfig { queue: string, exchange: string, routingKey: string }
+
+export interface ExchangeConfig {
+  name: string,
+  type: string,
+  options?: Options.AssertExchange
+}
+
+export interface QueueExchangeBindingConfig {
+  queue: string,
+  exchange: string,
+  routingKey: string
+}
 
 export type RmqEventRequestResponse <T = any> = Promise<RmqEventMessage<T>>;
 
@@ -68,6 +77,7 @@ export type RmqEventMessage<T = any> = {
 export type AckFn = (message: Message) => void;
 
 export type RabbitMqInitConfig = {
+  stopAutoInit: boolean,
   dontSendToReplyQueueOnPublish?: boolean,
   autoAckUnhandledMessageTypes?: boolean,
   pushUnhandledMessageTypesToDefaultHandler?: boolean,

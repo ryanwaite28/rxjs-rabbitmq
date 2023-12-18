@@ -61,16 +61,18 @@ export class RabbitMQClient {
   private connectionErrorStream: Subject<any> = new Subject<any>();
   private connectionCloseStream: Subject<any> = new Subject<any>();
   
+  /*
+    Handle all messages from all queues on this client
+  */
   private messagesStream: Subject<RmqEventMessage> = new Subject<RmqEventMessage>();
+  private messagesStreamsByQueue: MapType<Subject<RmqEventMessage>> = {};
 
   private queues: MapType<Replies.AssertQueue> = {};
   private exchanges:MapType<Replies.AssertExchange> = {};
   private bindings: QueueExchangeBindingConfig[] = [];
 
   private DEFAULT_LISTENER_TYPE = '__default';
-
   private EXCLUSIVE_QUEUE: string = uuidv1();
-
   private queueListeners: MapType<Subscription> = {};
   
   private queueToEventHandleMapping: MapType<
@@ -100,7 +102,7 @@ export class RabbitMQClient {
   }
 
   constructor(clientInitConfig: RabbitMqInitConfig) {
-    this.init(clientInitConfig);
+    !clientInitConfig.stopAutoInit && this.init(clientInitConfig);
   }
 
   init(clientInitConfig: RabbitMqInitConfig) {
@@ -120,20 +122,23 @@ export class RabbitMQClient {
     const retryDelay = clientInitConfig.retryDelay || 0;
     
     const init = () => {
+      // creating connection
       console.log(`Attempting connection to Rabbit MQ...`);
       return connect(connection_url)
         .then((connection) => {
           this.connection = connection;
-          console.log(`connected to message server`);
+          console.log(`Connected to message server`);
           return this.connection.createChannel();
         })
+        // creating channel
         .then((channel) => {
           this.channel = channel;
           if (prefetch) {
             this.channel.prefetch(prefetch || 1);
           }
-          console.log(`channel created on message server`);
+          console.log(`Channel created on message server`);
         })
+        // creating exclusive queue
         .then(() => {
           // create an exclusive queue for this channel connection
           console.log(`Creating exclusive queue ${this.EXCLUSIVE_QUEUE}`);
@@ -141,26 +146,29 @@ export class RabbitMQClient {
             console.log(`Created exclusive queue ${this.EXCLUSIVE_QUEUE}`);
           });
         })
+        // assert to queues
         .then(() => {
           const promises: Promise<Replies.AssertQueue>[] = [];
-          // by default, create an observable stream on the queue for unidentified/null routing keys
+
           for (const queueConfig of queues) {
             this.queueToEventHandleMapping[queueConfig.name] = {};
             this.queueToEventCallbackMapping[queueConfig.name] = {};
-
+            
             const queueListenersMap = this.queueToEventHandleMapping[queueConfig.name];
             const queueCallbacksMap = this.queueToEventCallbackMapping[queueConfig.name];
-
+            
+            // by default, create an observable stream on the queue for unidentified/null routing keys
             queueListenersMap[this.DEFAULT_LISTENER_TYPE] = new ReplaySubject();
 
-            for (const messageType of queueConfig.handleMessageTypes) {
+            const useHandleMessageTypes = queueConfig.handleMessageTypes || [];
+            for (const messageType of useHandleMessageTypes) {
               const isStringList = typeof messageType === 'string';
-
               if (isStringList) {
                 queueListenersMap[messageType as string] = new ReplaySubject();
               }
               else {
-                queueCallbacksMap[messageType.messageName] = messageType.callbackHandler;
+                const config: RmqHandleMessageTypeConfig = messageType;
+                queueCallbacksMap[config.messageName] = config.callbackHandler;
               }
             }
 
@@ -172,6 +180,7 @@ export class RabbitMQClient {
             console.log(`queues created on channel`);
           })
         })
+        // assert exchanges
         .then(() => {
           const promises = exchanges.map((config) => this.channel.assertExchange(config.name, config.type, config.options));
           return Promise.all(promises).then(values => {
@@ -179,6 +188,7 @@ export class RabbitMQClient {
             console.log(`exchanges created on channel`);
           });
         })
+        // apply bindings
         .then(() => {
           const promises = bindings.map((config) => this.channel.bindQueue(config.queue, config.exchange, config.routingKey));
           // bind the exclusive queue to all the exchanges
@@ -263,8 +273,10 @@ export class RabbitMQClient {
           publishEvent: this.publishEvent.bind(this),
         };
 
-        // send message to stream
+        // send message to general stream
         this.messagesStream.next(messageObj);
+        // send message to queue stream
+        this.messagesStreamsByQueue[queue]?.next(messageObj);
         
         // console.log(`Message on queue ${queue}:`, messageObj);
 
@@ -304,29 +316,35 @@ export class RabbitMQClient {
         }
       };
 
-      const consumerTag = Date.now().toString();
-
-      this.channel.consume(queue, handleCallback, { ...(options || {}), consumerTag: options?.consumerTag || consumerTag });
+      this.channel.consume(queue, handleCallback, { ...(options || {}) });
     }
+  }
+
+  private listenToQueue(queue: string, options?: Options.Consume) {
+    if (this.queueListeners[queue]) {
+      console.log(`Already Registered messages/events listener for queue: ${queue}`);
+      return;
+    }
+
+    console.log(`Registering messages/events listener for queue: ${queue}`);
+    const startQueueListener = this.getQueueListener(queue, options);
+
+    this.messagesStreamsByQueue[queue] = new Subject<RmqEventMessage>();
+    this.queueListeners[queue] = this.onReady.pipe(
+      tap((readyState) => {
+        startQueueListener()
+      })
+    )
+    .subscribe({
+      next: (readyState) => {
+        console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
+      }
+    });
   }
 
   onQueue(queue: string, options?: Options.Consume) {
     // listen for messages on the queue
-    if (!this.queueListeners[queue]) {
-      console.log(`Registering messages/events listener for queue ${queue}:`);
-      const startQueueListener = this.getQueueListener(queue, options);
-
-      this.queueListeners[queue] = this.onReady.pipe(
-        tap((readyState) => {
-          startQueueListener()
-        })
-      )
-      .subscribe({
-        next: (readyState) => {
-          console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
-        }
-      });
-    }
+    this.listenToQueue(queue, options);
     
     const handle = (messageType: string) => {
       return this.onReady.pipe(
@@ -365,6 +383,11 @@ export class RabbitMQClient {
       handleDefault,
       onEvent
     };
+  }
+
+  forQueue(queue: string, options?: Options.Consume) {
+    this.listenToQueue(queue, options);
+    return this.messagesStreamsByQueue[queue].asObservable();
   }
 
   ack(message: ConsumeMessage) {

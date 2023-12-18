@@ -1,4 +1,4 @@
-# RxJS Rabbit MQ Client
+# RxJS RabbitMQ Client
 
 
 
