@@ -77,7 +77,7 @@ export type RmqEventMessage<T = any> = {
 export type AckFn = (message: Message) => void;
 
 export type RabbitMqInitConfig = {
-  stopAutoInit: boolean,
+  stopAutoInit?: boolean,
   dontSendToReplyQueueOnPublish?: boolean,
   autoAckUnhandledMessageTypes?: boolean,
   pushUnhandledMessageTypesToDefaultHandler?: boolean,
