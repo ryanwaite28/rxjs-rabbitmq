@@ -19,7 +19,6 @@ export declare class RabbitMQClient {
     private exchanges;
     private bindings;
     private DEFAULT_LISTENER_TYPE;
-    private EXCLUSIVE_QUEUE;
     private queueListeners;
     private queueToEventHandleMapping;
     private queueToEventCallbackMapping;
@@ -29,18 +28,20 @@ export declare class RabbitMQClient {
     get onMessage(): Observable<RmqEventMessage>;
     constructor(clientInitConfig: RabbitMqInitConfig);
     init(clientInitConfig: RabbitMqInitConfig): Promise<void>;
-    getConnection(): Observable<Connection>;
-    getChannel(): Observable<Channel>;
+    getConnection(): Connection;
+    getChannel(): Channel;
     private getQueueListener;
     private listenToQueue;
     onQueue(queue: string, options?: Options.Consume): {
         handle: (messageType: string) => Observable<RmqEventMessage>;
+        handleAll: (handler: RmqEventHandler) => Subscription;
         handleDefault: () => Observable<RmqEventMessage>;
         onEvent: (messageType: string, handler: RmqEventHandler) => Subscription;
     };
     forQueue(queue: string, options?: Options.Consume): Observable<RmqEventMessage>;
     ack(message: ConsumeMessage): void;
-    sendMessage(options: RmqSendMessageParams): Promise<unknown>;
+    sendMessage(options: RmqSendMessageParams): void;
+    private getRpcMethods;
     sendRequest<T = any>(options: {
         queue: string;
         data: any;
