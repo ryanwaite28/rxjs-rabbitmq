@@ -1,4 +1,9 @@
-import { v1 as uuidv1 } from 'uuid';
+import {
+  v1 as uuidv1,
+  v4 as uuidv4,
+} from 'uuid';
+
+
 
 import {
   Connection,
@@ -37,6 +42,7 @@ import {
   RmqEventHandler,
   RmqEventMessage,
   RmqHandleMessageTypeConfig,
+  RmqHandleMessageTypeConfigs,
   RmqMessageTypeHandler,
   RmqPublishEventParams,
   RmqSendMessageParams
@@ -72,8 +78,7 @@ export class RabbitMQClient {
   private exchanges:MapType<Replies.AssertExchange> = {};
   private bindings: QueueExchangeBindingConfig[] = [];
 
-  private DEFAULT_LISTENER_TYPE = '__default';
-  private EXCLUSIVE_QUEUE: string = uuidv1();
+  private DEFAULT_LISTENER_TYPE: string = '__default';
   private queueListeners: MapType<Subscription> = {};
   
   private queueToEventHandleMapping: MapType<
@@ -119,10 +124,10 @@ export class RabbitMQClient {
       post_init_promises
     } = clientInitConfig;
 
-    let retryAttempts = clientInitConfig.retryAttempts || 0;
-    const retryDelay = clientInitConfig.retryDelay || 0;
+    let retryAttempts: number = clientInitConfig.retryAttempts || 0;
+    const retryDelay: number = clientInitConfig.retryDelay || 0;
     
-    const init = () => {
+    const init: () => Promise<any> = () => {
       // creating connection
       console.log(`Attempting connection to Rabbit MQ...`);
       return connect(connection_url)
@@ -139,14 +144,6 @@ export class RabbitMQClient {
           }
           console.log(`Channel created on message server`);
         })
-        // creating exclusive queue
-        .then(() => {
-          // create an exclusive queue for this channel connection
-          console.log(`Creating exclusive queue ${this.EXCLUSIVE_QUEUE}`);
-          return this.channel.assertQueue(this.EXCLUSIVE_QUEUE, { exclusive: true, durable: false }).then((response) => {
-            console.log(`Created exclusive queue ${this.EXCLUSIVE_QUEUE}`);
-          });
-        })
         // assert to queues
         .then(() => {
           const promises: Promise<Replies.AssertQueue>[] = [];
@@ -161,10 +158,9 @@ export class RabbitMQClient {
             // by default, create an observable stream on the queue for unidentified/null routing keys
             queueListenersMap[this.DEFAULT_LISTENER_TYPE] = new ReplaySubject();
 
-            const useHandleMessageTypes = queueConfig.handleMessageTypes || [];
+            const useHandleMessageTypes: RmqHandleMessageTypeConfigs = queueConfig.handleMessageTypes || [];
             for (const messageType of useHandleMessageTypes) {
-              const isStringList = typeof messageType === 'string';
-              if (isStringList) {
+              if (typeof messageType === 'string') {
                 queueListenersMap[messageType as string] = new ReplaySubject();
               }
               else {
@@ -179,11 +175,11 @@ export class RabbitMQClient {
           return Promise.all(promises).then((values) => {
             this.queues = mapify(values, 'queue');
             console.log(`queues created on channel`);
-          })
+          });
         })
         // assert exchanges
         .then(() => {
-          const promises = exchanges.map((config) => this.channel.assertExchange(config.name, config.type, config.options));
+          const promises: Promise<Replies.AssertExchange>[] = exchanges.map((config) => this.channel.assertExchange(config.name, config.type, config.options));
           return Promise.all(promises).then(values => {
             this.exchanges = mapify(values, 'exchange');
             console.log(`exchanges created on channel`);
@@ -191,7 +187,7 @@ export class RabbitMQClient {
         })
         // apply bindings
         .then(() => {
-          const promises = bindings.map((config) => this.channel.bindQueue(config.queue, config.exchange, config.routingKey));
+          const promises: Promise<Replies.Empty>[] = bindings.map((config) => this.channel.bindQueue(config.queue, config.exchange, config.routingKey));
           // bind the exclusive queue to all the exchanges
           // const exclusiveBindings = bindings.map((config) => this.channel.bindQueue(this.EXCLUSIVE_QUEUE, config.exchange, config.routingKey));
           return Promise.all(promises).then(values => {
@@ -208,7 +204,7 @@ export class RabbitMQClient {
             this.connectionErrorStream.next(err);
           });
           this.connection.on("close", (err) => {
-            this.connectionErrorStream.next(err);
+            this.connectionCloseStream.next(err);
           });
 
           this.isReady = true;
@@ -243,11 +239,11 @@ export class RabbitMQClient {
   }
 
   getConnection() {
-    return this.onReady.pipe(map(() => this.connection));
+    return this.connection;
   }
 
   getChannel() {
-    return this.onReady.pipe(map(() => this.channel));
+    return this.channel;
   }
 
   private getQueueListener(queue: string, options?: Options.Consume) {
@@ -352,19 +348,14 @@ export class RabbitMQClient {
     this.listenToQueue(queue, options);
     
     const handle = (messageType: string) => {
-      // return this.onReady.pipe(
-      //   mergeMap((ready: boolean, index: number) => {
-      //     if (!this.queueToEventHandleMapping[queue][messageType]) {
-      //       throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
-      //     }
-      //     return this.queueToEventHandleMapping[queue][messageType].asObservable();
-      //   })
-      // );
-
-      return this.messagesStreamsByQueue[queue]
-      .asObservable()
-      .pipe(filter(() => this.isReady))
-      .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
+      return this.onReady.pipe(
+        mergeMap((ready: boolean, index: number) => {
+          if (!this.queueToEventHandleMapping[queue][messageType]) {
+            throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
+          }
+          return this.queueToEventHandleMapping[queue][messageType].asObservable();
+        })
+      );
     };
 
     const handleDefault = () => {
@@ -377,15 +368,21 @@ export class RabbitMQClient {
       Providing callback function approach
     */
     const onEvent = (messageType: string, handler: RmqEventHandler) => {
-      return this.messagesStreamsByQueue[queue]
-      .asObservable()
-      .pipe(filter(() => this.isReady))
-      .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
-      .subscribe({ next: handler });
+      return this.onReady
+        .pipe(mergeMap(() => this.messagesStreamsByQueue[queue]))
+        .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
+        .subscribe({ next: handler });
+    };
+
+    const handleAll = (handler: RmqEventHandler) => {
+      return this.onReady
+        .pipe(mergeMap(() => this.messagesStreamsByQueue[queue]))
+        .subscribe({ next: handler });
     };
 
     return {
       handle,
+      handleAll,
       handleDefault,
       onEvent,
     };
@@ -402,58 +399,46 @@ export class RabbitMQClient {
   }
 
   sendMessage(options: RmqSendMessageParams) {
-    return new Promise((resolve, reject) => {
-      const send = () => {
-        const { data, publishOptions, queue } = options;
-        const useContentType = publishOptions.contentType || ContentTypes.TEXT;
-        const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
-        this.channel.sendToQueue(queue, useData, { ...publishOptions, appId: publishOptions.appId });
-        resolve(undefined);
-      };
-  
-      if (!this.isReady) {
-        console.log(`wait until ready to send message...`);
-        firstValueFrom(this.onReady).then((readyState) => {
-          console.log(`now ready to send message`, { readyState });
-          send();
-        });
-      }
-      else {
-        console.log(`is ready to send message`);
+    const send = () => {
+      const { data, publishOptions, queue } = options;
+      const useContentType = publishOptions.contentType || ContentTypes.TEXT;
+      const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
+      this.channel.sendToQueue(queue, useData, { ...publishOptions, appId: publishOptions.appId });
+    };
+
+    if (!this.isReady) {
+      console.log(`wait until ready to send message...`);
+      firstValueFrom(this.onReady).then((readyState) => {
+        console.log(`now ready to send message`, { readyState });
         send();
-      }
-    });
+      });
+    }
+    else {
+      console.log(`is ready to send message`);
+      send();
+    }
   }
 
-  sendRequest <T = any> (options: {
+  private getRpcMethods(temporaryRpcQueue: string, options: {
     queue: string,
     data: any,
     publishOptions: Options.Publish,
   }) {
-    console.log(`sendRequest:`, options);
+    const start_time = Date.now();
+    const consumerTag = uniqueValue();
+    const correlationId = options.publishOptions.correlationId || uuidv4();
 
-    return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
-      const start_time = Date.now();
-
-      const consumerTag = uniqueValue();
-      const correlationId = options.publishOptions.correlationId || uniqueValue();
-      const temporaryRpcQueue = uuidv1();
-
-      const newQueue = await this.channel.assertQueue(temporaryRpcQueue, { exclusive: true, durable: false, autoDelete: true }).then((response) => {
-        console.log(`Created temp queue ${temporaryRpcQueue} for client.`);
-        return response;
-      });
-
-      const send = () => {
-        const { data, publishOptions, queue } = options;
-        const useContentType = publishOptions.contentType || ContentTypes.TEXT;
-        const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
-        this.channel.sendToQueue(queue, useData, { ...publishOptions, correlationId, replyTo: temporaryRpcQueue, appId: publishOptions.appId });
-      };
-
-      const watch = () => {
-        console.log(`request/rpc sent; awaiting response...`, { correlationId, consumerTag });
-
+    const send = () => {
+      const { data, publishOptions, queue } = options;
+      const useContentType = publishOptions.contentType || ContentTypes.TEXT;
+      const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
+      this.channel.sendToQueue(queue, useData, { ...publishOptions, correlationId, replyTo: temporaryRpcQueue, appId: publishOptions.appId });
+    };
+  
+    const watch = <T> () => {
+      return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
+        console.log(`request/rpc sent; awaiting response...`, { correlationId, consumerTag, temporaryRpcQueue });
+  
         const replyHandler = (message: ConsumeMessage | null) => {
           console.log(`\nReceived reply.\n`, { message });
           const correlationIdMatch = message!.properties.correlationId == correlationId;
@@ -480,26 +465,59 @@ export class RabbitMQClient {
             console.log(`received response from request/rpc:`, { start_time, end_time, total_time, time_in_seconds, messageObj, options });
             resolve(messageObj);
             this.channel.cancel(consumerTag).then(() => {
-              console.log(`removed consumer via consumerTag`);
+              console.log(`removed consumer via consumerTag; deleting temporary queue ${temporaryRpcQueue}...`);
+              this.channel.deleteQueue(temporaryRpcQueue, { ifEmpty: true, ifUnused: true })
+              .then(() => {
+                console.log(`temp queue deleted: ${temporaryRpcQueue}`);
+              })
+              .catch((error) => {
+                console.log(`could not delete temp queue ${temporaryRpcQueue}`);
+              });
             });
           }
         };
-
+    
         this.channel.consume(temporaryRpcQueue, replyHandler, { consumerTag });
-      };
+      });
+    };
+
+    return { watch, send };
+  }
+
+  sendRequest <T = any> (options: {
+    queue: string,
+    data: any,
+    publishOptions: Options.Publish,
+  }) {
+    console.log(`sendRequest:`, options);
+
+    return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
+      
+      const temporaryRpcQueue = uuidv1();
+
+      const newQueue = await this.channel.assertQueue(temporaryRpcQueue, { exclusive: true, durable: false, autoDelete: true }).then((response) => {
+        console.log(`Created temp queue ${temporaryRpcQueue} for client.`);
+        return response;
+      });
+
+      const rpc = this.getRpcMethods(temporaryRpcQueue, options);
 
       if (!this.isReady) {
         console.log(`waiting until ready to send request`);
         firstValueFrom(this.onReady).then((readyState) => {
           console.log(`now ready to publish event`, { readyState });
-          watch(); // first listen on the reply queue
-          send(); // then send the rpc/rmq message
+          rpc.watch<T>().then((message: RmqEventMessage<T>) => {
+            resolve(message);
+          }); // first listen on the reply queue
+          rpc.send(); // then send the rpc/rmq message
         });
       }
       else {
         console.log(`is ready to send request`);
-        watch();
-        send();
+        rpc.watch<T>().then((message: RmqEventMessage<T>) => {
+          resolve(message);
+        }); // first listen on the reply queue
+        rpc.send(); // then send the rpc/rmq message
       }
     });
   }
@@ -511,18 +529,18 @@ export class RabbitMQClient {
       const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
       this.channel.publish(exchange, routingKey || '', useData, { ...publishOptions, appId: publishOptions.appId });
 
-      if (publishOptions.replyTo && !this.clientInitConfig.dontSendToReplyQueueOnPublish) {
-        console.log(`sending copy to reply to queue ${publishOptions.replyTo}...`);
-        this.channel.sendToQueue(publishOptions.replyTo, useData, publishOptions);
-      }
+      // if (publishOptions.replyTo && !this.clientInitConfig.dontSendToReplyQueueOnPublish) {
+      //   console.log(`sending copy to reply to queue ${publishOptions.replyTo}...`);
+      //   this.channel.sendToQueue(publishOptions.replyTo, useData, publishOptions);
+      // }
     };
 
     if (!this.isReady) {
       console.log(`wait until ready to publish event`);
       this.onReady.subscribe({
-        next: (readyState) => {
-          console.log(`now ready to publish event`, { readyState });
-          readyState && publish();
+        next: () => {
+          console.log(`now ready to publish event`);
+          publish();
         }
       });
     }
@@ -531,13 +549,4 @@ export class RabbitMQClient {
       publish();
     }
   }
-
-  // listen() {
-  //   // last resort to keeping the node.js process running
-  //   const listenerCallback = () => {
-  //     console.log(`--- listening... ---`);
-  //   };
-  //   const interval = setInterval(listenerCallback, 1000 * 60 * 10);
-  //   return interval;
-  // }
 }
