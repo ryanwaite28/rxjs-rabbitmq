@@ -528,11 +528,6 @@ export class RabbitMQClient {
       const useContentType = publishOptions.contentType || ContentTypes.TEXT;
       const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].serialize(data) : data;
       this.channel.publish(exchange, routingKey || '', useData, { ...publishOptions, appId: publishOptions.appId });
-
-      // if (publishOptions.replyTo && !this.clientInitConfig.dontSendToReplyQueueOnPublish) {
-      //   console.log(`sending copy to reply to queue ${publishOptions.replyTo}...`);
-      //   this.channel.sendToQueue(publishOptions.replyTo, useData, publishOptions);
-      // }
     };
 
     if (!this.isReady) {
