@@ -310,7 +310,7 @@ class RabbitMQClient {
             send();
         }
     }
-    getRpcMethods(temporaryRpcQueue, options) {
+    getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply) {
         const start_time = Date.now();
         const consumerTag = (0, utils_1.uniqueValue)();
         const correlationId = options.publishOptions.correlationId || (0, uuid_1.v4)();
@@ -345,17 +345,10 @@ class RabbitMQClient {
                         const total_time = (end_time - start_time) / 1000;
                         const time_in_seconds = total_time.toFixed();
                         console.log(`received response from request/rpc:`, { start_time, end_time, total_time, time_in_seconds, messageObj, options });
+                        if (autoAckOnReceiveReply) {
+                            this.ack(message);
+                        }
                         resolve(messageObj);
-                        // this.channel.cancel(consumerTag).then(() => {
-                        //   console.log(`removed consumer via consumerTag; deleting temporary queue ${temporaryRpcQueue}...`);
-                        //   this.channel.deleteQueue(temporaryRpcQueue, { ifEmpty: true, ifUnused: true })
-                        //   .then(() => {
-                        //     console.log(`temp queue deleted: ${temporaryRpcQueue}`);
-                        //   })
-                        //   .catch((error) => {
-                        //     console.log(`could not delete temp queue ${temporaryRpcQueue}`);
-                        //   });
-                        // });
                     }
                 };
                 this.channel.consume(temporaryRpcQueue, replyHandler, { consumerTag });
@@ -363,7 +356,7 @@ class RabbitMQClient {
         };
         return { watch, send };
     }
-    sendRequest(options) {
+    sendRequest(options, autoAckOnReceiveReply = true) {
         console.log(`sendRequest:`, options);
         return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
             const temporaryRpcQueue = (0, uuid_1.v1)();
@@ -371,7 +364,7 @@ class RabbitMQClient {
                 console.log(`Created temp queue ${temporaryRpcQueue} for client.`);
                 return response;
             });
-            const rpc = this.getRpcMethods(temporaryRpcQueue, options);
+            const rpc = this.getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply);
             if (!this.isReady) {
                 console.log(`waiting until ready to send request`);
                 (0, rxjs_1.firstValueFrom)(this.onReady).then((readyState) => {

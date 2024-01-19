@@ -427,7 +427,7 @@ export class RabbitMQClient {
     queue: string,
     data: any,
     publishOptions: Options.Publish,
-  }) {
+  }, autoAckOnReceiveReply: boolean) {
     const start_time = Date.now();
     const consumerTag = uniqueValue();
     const correlationId = options.publishOptions.correlationId || uuidv4();
@@ -466,17 +466,10 @@ export class RabbitMQClient {
             const total_time = (end_time - start_time) / 1000;
             const time_in_seconds = total_time.toFixed();
             console.log(`received response from request/rpc:`, { start_time, end_time, total_time, time_in_seconds, messageObj, options });
+            if (autoAckOnReceiveReply) {
+              this.ack(message!);
+            }
             resolve(messageObj);
-            // this.channel.cancel(consumerTag).then(() => {
-            //   console.log(`removed consumer via consumerTag; deleting temporary queue ${temporaryRpcQueue}...`);
-            //   this.channel.deleteQueue(temporaryRpcQueue, { ifEmpty: true, ifUnused: true })
-            //   .then(() => {
-            //     console.log(`temp queue deleted: ${temporaryRpcQueue}`);
-            //   })
-            //   .catch((error) => {
-            //     console.log(`could not delete temp queue ${temporaryRpcQueue}`);
-            //   });
-            // });
           }
         };
     
@@ -487,11 +480,14 @@ export class RabbitMQClient {
     return { watch, send };
   }
 
-  sendRequest <T = any> (options: {
-    queue: string,
-    data: any,
-    publishOptions: Options.Publish,
-  }) {
+  sendRequest <T = any> (
+    options: {
+      queue: string,
+      data: any,
+      publishOptions: Options.Publish,
+    },
+    autoAckOnReceiveReply: boolean = true
+  ) {
     console.log(`sendRequest:`, options);
 
     return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
@@ -503,7 +499,7 @@ export class RabbitMQClient {
         return response;
       });
 
-      const rpc = this.getRpcMethods(temporaryRpcQueue, options);
+      const rpc = this.getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply);
 
       if (!this.isReady) {
         console.log(`waiting until ready to send request`);

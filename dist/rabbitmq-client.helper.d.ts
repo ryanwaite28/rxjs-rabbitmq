@@ -46,6 +46,6 @@ export declare class RabbitMQClient {
         queue: string;
         data: any;
         publishOptions: Options.Publish;
-    }): Promise<RmqEventMessage<T>>;
+    }, autoAckOnReceiveReply?: boolean): Promise<RmqEventMessage<T>>;
     publishEvent(options: RmqPublishEventParams): void;
 }
