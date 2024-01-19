@@ -346,16 +346,16 @@ class RabbitMQClient {
                         const time_in_seconds = total_time.toFixed();
                         console.log(`received response from request/rpc:`, { start_time, end_time, total_time, time_in_seconds, messageObj, options });
                         resolve(messageObj);
-                        this.channel.cancel(consumerTag).then(() => {
-                            console.log(`removed consumer via consumerTag; deleting temporary queue ${temporaryRpcQueue}...`);
-                            this.channel.deleteQueue(temporaryRpcQueue, { ifEmpty: true, ifUnused: true })
-                                .then(() => {
-                                console.log(`temp queue deleted: ${temporaryRpcQueue}`);
-                            })
-                                .catch((error) => {
-                                console.log(`could not delete temp queue ${temporaryRpcQueue}`);
-                            });
-                        });
+                        // this.channel.cancel(consumerTag).then(() => {
+                        //   console.log(`removed consumer via consumerTag; deleting temporary queue ${temporaryRpcQueue}...`);
+                        //   this.channel.deleteQueue(temporaryRpcQueue, { ifEmpty: true, ifUnused: true })
+                        //   .then(() => {
+                        //     console.log(`temp queue deleted: ${temporaryRpcQueue}`);
+                        //   })
+                        //   .catch((error) => {
+                        //     console.log(`could not delete temp queue ${temporaryRpcQueue}`);
+                        //   });
+                        // });
                     }
                 };
                 this.channel.consume(temporaryRpcQueue, replyHandler, { consumerTag });
