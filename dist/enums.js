@@ -1,17 +1,20 @@
-export var ContentTypes;
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MimeTypes = exports.ExchangeTypes = exports.ContentTypes = void 0;
+var ContentTypes;
 (function (ContentTypes) {
     ContentTypes["JSON"] = "application/json";
     ContentTypes["TEXT"] = "text/plain";
     ContentTypes["STREAM"] = "application/octet-stream";
-})(ContentTypes || (ContentTypes = {}));
-export var ExchangeTypes;
+})(ContentTypes || (exports.ContentTypes = ContentTypes = {}));
+var ExchangeTypes;
 (function (ExchangeTypes) {
     ExchangeTypes["DIRECT"] = "direct";
     ExchangeTypes["TOPIC"] = "topic";
     ExchangeTypes["HEADERS"] = "headers";
     ExchangeTypes["FANOUT"] = "fanout";
-})(ExchangeTypes || (ExchangeTypes = {}));
-export var MimeTypes;
+})(ExchangeTypes || (exports.ExchangeTypes = ExchangeTypes = {}));
+var MimeTypes;
 (function (MimeTypes) {
     MimeTypes["AAC"] = "audio/aac";
     MimeTypes["ABW"] = "application/x-abiword";
@@ -85,5 +88,5 @@ export var MimeTypes;
     MimeTypes["VIDEO_3GP"] = "video/3gpp";
     MimeTypes["VIDEO_3G2"] = "video/3gpp2";
     MimeTypes["COMPRESS_7Z"] = "application/x-7z-compressed";
-})(MimeTypes || (MimeTypes = {}));
+})(MimeTypes || (exports.MimeTypes = MimeTypes = {}));
 //# sourceMappingURL=enums.js.map

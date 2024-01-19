@@ -1,6 +1,6 @@
 {
   "name": "rxjs-rabbitmq",
-  "version": "2.1.6",
+  "version": "2.1.7",
   "description": "RxJS powered RabbitMQ event handling",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

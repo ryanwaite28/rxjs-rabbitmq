@@ -1,5 +1,8 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.uniqueValue = exports.wait = exports.mapify = exports.SERIALIZERS = void 0;
 // https://github.com/Foo-Foo-MQ/foo-foo-mq/blob/main/src/index.js
-export const SERIALIZERS = {
+exports.SERIALIZERS = {
     'application/json': {
         deserialize: (bytes, encoding) => {
             return JSON.parse(bytes.toString(encoding || 'utf8'));
@@ -36,18 +39,21 @@ export const SERIALIZERS = {
         }
     }
 };
-export const mapify = (list, key) => {
+const mapify = (list, key) => {
     return list.reduce((map, item) => {
         map[item[key]] = item;
         return map;
     }, {});
 };
-export const wait = (time) => {
+exports.mapify = mapify;
+const wait = (time) => {
     return new Promise((resolve) => {
         setTimeout(resolve, time);
     });
 };
-export function uniqueValue() {
+exports.wait = wait;
+function uniqueValue() {
     return Math.random().toString(33).substring(2) + '-' + Date.now();
 }
+exports.uniqueValue = uniqueValue;
 //# sourceMappingURL=utils.js.map
