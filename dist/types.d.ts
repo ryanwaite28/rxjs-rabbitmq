@@ -104,7 +104,7 @@ export type RmqEventMessage<T = any> = {
     sendMessage: (options: RmqSendMessageParams) => void;
     sendRequest: <T = any>(options: RmqSendRequestParams) => Promise<RmqEventMessage<T>>;
 };
-export type RmqEventHandler = (event: RmqEventMessage) => Promise<void>;
+export type RmqEventHandler = (event: RmqEventMessage) => any;
 export type AckFn = (message: Message) => void;
 /**
     

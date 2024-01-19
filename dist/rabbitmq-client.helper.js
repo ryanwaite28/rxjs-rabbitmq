@@ -49,6 +49,10 @@ export class RabbitMQClient {
         !clientInitConfig.stopAutoInit && this.init();
     }
     init() {
+        if (this.isReady) {
+            console.log(`Already initialized`);
+            return;
+        }
         const { delayStart, connection_url, prefetch, queues, exchanges, bindings, pre_init_promises, post_init_promises } = this.clientInitConfig;
         let retryAttempts = this.clientInitConfig.retryAttempts || 0;
         const retryDelay = this.clientInitConfig.retryDelay || 0;
