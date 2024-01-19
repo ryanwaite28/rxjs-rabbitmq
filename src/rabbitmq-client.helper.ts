@@ -237,7 +237,7 @@ export class RabbitMQClient {
     .then(() => {
       console.log(`Running post init promises...`);
       return Promise.all(post_init_promises?.map(p => p instanceof Promise ? p : p()) || []).then(() => {
-        console.log(`Done running post init promises. `);
+        console.log(`Done running post init promises. \n\n-------\n\n`);
       });
     });
   }
@@ -255,12 +255,12 @@ export class RabbitMQClient {
       // callback
       const handleCallback = (message: ConsumeMessage | null) => {
         if (!message) {
-          console.log('Consumer cancelled by server');
+          // console.log('Consumer cancelled by server');
           // throw new Error('Consumer cancelled by server');
           return;
         }
 
-        console.log(`Received queue message.`, message);
+        // console.log(`Received queue message.`, message);
         
         // see if a listener was created for the routing key
         const messageType = message.properties.type;
@@ -315,7 +315,7 @@ export class RabbitMQClient {
             return;
           }
           else {
-            console.error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
+            // console.error(`Message received with unregistered message type handler/callback. Please add message type "${messageType}" in the list of message types for the queue config in the constructor.`);
           }
         }
       };
@@ -450,7 +450,6 @@ export class RabbitMQClient {
           console.log({ isReplyToRequest, consumerTag, correlationIdMatch, requestCorrelationId: correlationId, responseCorrelationId: message!.properties.correlationId });
           
           if (isReplyToRequest) {
-            this.ack(message!);
             const useContentType = message!.properties.contentType;
             const useData = SERIALIZERS[useContentType] ? SERIALIZERS[useContentType].deserialize(message!.content) : message!.content;
             const messageObj: RmqEventMessage = {
@@ -509,18 +508,20 @@ export class RabbitMQClient {
       if (!this.isReady) {
         console.log(`waiting until ready to send request`);
         firstValueFrom(this.onReady).then((readyState) => {
-          console.log(`now ready to publish event`, { readyState });
+          console.log(`now ready and watching temp queue`, { readyState });
           rpc.watch<T>().then((message: RmqEventMessage<T>) => {
             resolve(message);
           }); // first listen on the reply queue
+          console.log(`sending request`);
           rpc.send(); // then send the rpc/rmq message
         });
       }
       else {
-        console.log(`is ready to send request`);
+        console.log(`now ready and watching temp queue`);
         rpc.watch<T>().then((message: RmqEventMessage<T>) => {
           resolve(message);
         }); // first listen on the reply queue
+        console.log(`sending request`);
         rpc.send(); // then send the rpc/rmq message
       }
     });
