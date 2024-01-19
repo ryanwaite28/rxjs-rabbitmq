@@ -27,7 +27,7 @@ export declare class RabbitMQClient {
     get onConnectionClose(): Observable<any>;
     get onMessage(): Observable<RmqEventMessage>;
     constructor(clientInitConfig: RabbitMqInitConfig);
-    init(clientInitConfig: RabbitMqInitConfig): Promise<void>;
+    init(): Promise<void>;
     getConnection(): Connection;
     getChannel(): Channel;
     private getQueueListener;

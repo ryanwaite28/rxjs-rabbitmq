@@ -108,11 +108,15 @@ export class RabbitMQClient {
   }
 
   constructor(clientInitConfig: RabbitMqInitConfig) {
-    !clientInitConfig.stopAutoInit && this.init(clientInitConfig);
+    this.clientInitConfig = clientInitConfig;
+    !clientInitConfig.stopAutoInit && this.init();
   }
 
-  init(clientInitConfig: RabbitMqInitConfig) {
-    this.clientInitConfig = clientInitConfig;
+  init() {
+    if (this.isReady) {
+      console.log(`Already initialized`);
+      return;
+    }
     const {
       delayStart,
       connection_url,
@@ -122,10 +126,10 @@ export class RabbitMQClient {
       bindings,
       pre_init_promises,
       post_init_promises
-    } = clientInitConfig;
+    } = this.clientInitConfig;
 
-    let retryAttempts: number = clientInitConfig.retryAttempts || 0;
-    const retryDelay: number = clientInitConfig.retryDelay || 0;
+    let retryAttempts: number = this.clientInitConfig.retryAttempts || 0;
+    const retryDelay: number = this.clientInitConfig.retryDelay || 0;
     
     const init: () => Promise<any> = () => {
       // creating connection
@@ -198,7 +202,7 @@ export class RabbitMQClient {
           console.log(`Client initialization complete; waiting for messages/events...\n`);
 
           // initialization complete; listen for connection issues to retry again
-          retryAttempts = clientInitConfig.retryAttempts;
+          retryAttempts = this.clientInitConfig.retryAttempts;
           
           this.connection.on("error", (err) => {
             this.connectionErrorStream.next(err);
