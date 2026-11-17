@@ -1,7 +1,7 @@
-import { MapType } from "./types";
+import { MapType, RabbitMqSerializer, RabbitMqSerializerMap } from "./types";
 
 // https://github.com/Foo-Foo-MQ/foo-foo-mq/blob/main/src/index.js
-export const SERIALIZERS = {
+export const SERIALIZERS: RabbitMqSerializerMap = {
   'application/json': {
     deserialize: (bytes: any, encoding: any) => {
       return JSON.parse(bytes.toString(encoding || 'utf8'));
@@ -31,10 +31,19 @@ export const SERIALIZERS = {
     deserialize: (bytes: any, encoding: any) => {
       return bytes.toString(encoding || 'utf8');
     },
-    serialize: (str: string) => {
-      return Buffer.from(str, 'utf8');
+    serialize: (value: unknown) => {
+      return Buffer.from(String(value), 'utf8');
     }
   }
+};
+
+export const registerSerializer = (contentType: string, serializer: RabbitMqSerializer) => {
+  SERIALIZERS[contentType] = serializer;
+  return SERIALIZERS[contentType];
+};
+
+export const getSerializer = (contentType: string) => {
+  return SERIALIZERS[contentType] || null;
 };
 
 export const mapify = <T> (list: T[], key: string | number): MapType<T> => {

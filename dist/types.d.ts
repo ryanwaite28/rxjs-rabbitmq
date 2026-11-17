@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { Options, ConsumeMessage, Message } from "amqplib";
 /**
     
@@ -5,13 +6,14 @@ import { Options, ConsumeMessage, Message } from "amqplib";
 export type MapType<T = any> = {
     [key: string]: T;
 };
-export type RmqMessageTypeHandler = (event: RmqEventMessage) => Promise<void>;
+export type RmqMessageTypeHandler = (event: RmqEventMessage) => Promise<void> | void;
 export type RmqHandleMessageTypeConfig = {
     messageName: string;
     callbackHandler: RmqMessageTypeHandler;
 };
 export type RmqHandleMessageTypeConfigs = string[] | RmqHandleMessageTypeConfig[];
 export type ExchangeType = 'direct' | 'topic' | 'headers' | 'fanout';
+export type RmqPayload = unknown;
 export interface QueueConfig {
     /**
       The name of the queue you want to consume messages from
@@ -80,32 +82,53 @@ export interface QueueExchangeBindingConfig {
     routingKey: string;
 }
 export type RmqEventRequestResponse<T = any> = Promise<RmqEventMessage<T>>;
-export type RmqSendMessageParams = {
+export type RmqSendMessageParams<T = unknown> = {
     queue: string;
-    data: any;
+    data: T;
     publishOptions: Options.Publish;
 };
-export type RmqSendRequestParams = {
+export type RmqSendRequestParams<T = unknown> = {
     queue: string;
-    data: any;
+    data: T;
     publishOptions: Options.Publish;
 };
-export type RmqPublishEventParams<T = any> = {
+export type RmqPublishEventParams<T = unknown> = {
     exchange: string;
     data: T;
     routingKey?: string;
     publishOptions: Options.Publish;
 };
-export type RmqEventMessage<T = any> = {
+export type RmqEventMessage<T = unknown> = {
     data: T;
     message: ConsumeMessage;
     ack: () => void;
     publishEvent: (options: RmqPublishEventParams) => void;
-    sendMessage: (options: RmqSendMessageParams) => void;
-    sendRequest: <T = any>(options: RmqSendRequestParams) => Promise<RmqEventMessage<T>>;
+    sendMessage: <U = unknown>(options: RmqSendMessageParams<U>) => void;
+    sendRequest: <U = unknown>(options: RmqSendRequestParams<U>) => Promise<RmqEventMessage<U>>;
 };
-export type RmqEventHandler = (event: RmqEventMessage) => any;
+export type RmqEventHandler = (event: RmqEventMessage) => unknown;
 export type AckFn = (message: Message) => void;
+export type RabbitMqLogger = {
+    debug: (...args: any[]) => void;
+    info: (...args: any[]) => void;
+    warn: (...args: any[]) => void;
+    error: (...args: any[]) => void;
+};
+export type RabbitMqMetrics = {
+    messagesReceived: number;
+    messagesPublished: number;
+    messagesAcked: number;
+    messagesNacked: number;
+    messagesRetried: number;
+    rpcRequests: number;
+    rpcResponses: number;
+    reconnects: number;
+};
+export type RabbitMqSerializer = {
+    serialize: (value: unknown) => Buffer;
+    deserialize: (value: Buffer, encoding?: BufferEncoding) => unknown;
+};
+export type RabbitMqSerializerMap = Record<string, RabbitMqSerializer>;
 /**
     
 */
@@ -118,6 +141,9 @@ export type RabbitMqInitConfig = {
     dontSendToReplyQueueOnPublish?: boolean;
     autoAckUnhandledMessageTypes?: boolean;
     pushUnhandledMessageTypesToDefaultHandler?: boolean;
+    logger?: Partial<RabbitMqLogger>;
+    metrics?: boolean;
+    rpcRequestTimeoutMs?: number;
     delayStart?: number;
     connection_url: string;
     retryAttempts: number;

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uniqueValue = exports.wait = exports.mapify = exports.SERIALIZERS = void 0;
+exports.uniqueValue = exports.wait = exports.mapify = exports.getSerializer = exports.registerSerializer = exports.SERIALIZERS = void 0;
 // https://github.com/Foo-Foo-MQ/foo-foo-mq/blob/main/src/index.js
 exports.SERIALIZERS = {
     'application/json': {
@@ -34,11 +34,20 @@ exports.SERIALIZERS = {
         deserialize: (bytes, encoding) => {
             return bytes.toString(encoding || 'utf8');
         },
-        serialize: (str) => {
-            return Buffer.from(str, 'utf8');
+        serialize: (value) => {
+            return Buffer.from(String(value), 'utf8');
         }
     }
 };
+const registerSerializer = (contentType, serializer) => {
+    exports.SERIALIZERS[contentType] = serializer;
+    return exports.SERIALIZERS[contentType];
+};
+exports.registerSerializer = registerSerializer;
+const getSerializer = (contentType) => {
+    return exports.SERIALIZERS[contentType] || null;
+};
+exports.getSerializer = getSerializer;
 const mapify = (list, key) => {
     return list.reduce((map, item) => {
         map[item[key]] = item;

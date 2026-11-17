@@ -19,6 +19,10 @@ const enums_1 = require("./enums");
   Rabbit MQ - RxJS Powered
 */
 class RabbitMQClient {
+    log(level, ...args) {
+        const handler = this.logger[level] || (() => undefined);
+        handler(...args);
+    }
     get onReady() {
         return this.isReadyStream.asObservable().pipe((0, rxjs_1.filter)((state) => !!state), (0, rxjs_1.take)(1));
     }
@@ -32,10 +36,12 @@ class RabbitMQClient {
         return this.messagesStream.asObservable();
     }
     constructor(clientInitConfig) {
+        var _a, _b, _c, _d, _e, _f, _g, _h;
         this.isReady = false;
         this.isReadyStream = new rxjs_1.BehaviorSubject(this.isReady);
         this.connectionErrorStream = new rxjs_1.Subject();
         this.connectionCloseStream = new rxjs_1.Subject();
+        this.reconnectAttempts = 0;
         /*
           Handle all messages from all queues on this client
         */
@@ -46,26 +52,81 @@ class RabbitMQClient {
         this.bindings = [];
         this.DEFAULT_LISTENER_TYPE = '__default';
         this.queueListeners = {};
-        this.queueToEventHandleMapping = {};
-        this.queueToEventCallbackMapping = {};
+        this.registeredQueueConsumers = [];
+        this.metrics = {
+            messagesReceived: 0,
+            messagesPublished: 0,
+            messagesAcked: 0,
+            messagesNacked: 0,
+            messagesRetried: 0,
+            rpcRequests: 0,
+            rpcResponses: 0,
+            reconnects: 0,
+        };
+        this.queueToEventHandleMapping = new Map();
+        this.queueToEventCallbackMapping = new Map();
         this.clientInitConfig = clientInitConfig;
+        this.metricsEnabled = !!clientInitConfig.metrics;
+        this.logger = {
+            debug: (_b = (_a = clientInitConfig.logger) === null || _a === void 0 ? void 0 : _a.debug) !== null && _b !== void 0 ? _b : (() => undefined),
+            info: (_d = (_c = clientInitConfig.logger) === null || _c === void 0 ? void 0 : _c.info) !== null && _d !== void 0 ? _d : console.info.bind(console),
+            warn: (_f = (_e = clientInitConfig.logger) === null || _e === void 0 ? void 0 : _e.warn) !== null && _f !== void 0 ? _f : console.warn.bind(console),
+            error: (_h = (_g = clientInitConfig.logger) === null || _g === void 0 ? void 0 : _g.error) !== null && _h !== void 0 ? _h : console.error.bind(console),
+        };
         !clientInitConfig.stopAutoInit && this.init();
+    }
+    static registerSerializer(contentType, serializer) {
+        return (0, utils_1.registerSerializer)(contentType, serializer);
+    }
+    getMetrics() {
+        return Object.assign({}, this.metrics);
+    }
+    resubscribeToRegisteredQueues() {
+        for (const { queue, options } of this.registeredQueueConsumers) {
+            if (this.queueListeners[queue]) {
+                this.queueListeners[queue].unsubscribe();
+                delete this.queueListeners[queue];
+            }
+            this.listenToQueue(queue, options);
+        }
+    }
+    scheduleReconnect(reason) {
+        if (this.reconnectTimeout) {
+            return;
+        }
+        const retryAttempts = this.clientInitConfig.retryAttempts || 0;
+        if (retryAttempts > 0 && this.reconnectAttempts >= retryAttempts) {
+            this.log('error', `RabbitMQ reconnect attempts exhausted after ${retryAttempts} tries.`);
+            return;
+        }
+        this.isReady = false;
+        this.isReadyStream.next(false);
+        this.reconnectAttempts += 1;
+        this.metrics.reconnects += 1;
+        const retryDelay = this.clientInitConfig.retryDelay || 1000;
+        this.log('warn', `${reason}; reconnecting in ${retryDelay}ms (attempt ${this.reconnectAttempts}/${retryAttempts || '∞'})`);
+        this.reconnectTimeout = setTimeout(() => {
+            this.reconnectTimeout = undefined;
+            this.init().catch((error) => {
+                this.log('error', 'Reconnect failed', error);
+            });
+        }, retryDelay);
     }
     init() {
         if (this.isReady) {
-            console.log(`Already initialized`);
-            return;
+            this.log('info', 'Already initialized');
+            return Promise.resolve();
         }
         const { delayStart, connection_url, prefetch, queues, exchanges, bindings, pre_init_promises, post_init_promises } = this.clientInitConfig;
         let retryAttempts = this.clientInitConfig.retryAttempts || 0;
         const retryDelay = this.clientInitConfig.retryDelay || 0;
         const init = () => {
             // creating connection
-            console.log(`Attempting connection to Rabbit MQ...`);
+            this.log('info', 'Attempting connection to Rabbit MQ...');
             return (0, amqplib_1.connect)(connection_url)
                 .then((connection) => {
                 this.connection = connection;
-                console.log(`Connected to message server`);
+                this.log('info', 'Connected to message server');
                 return this.connection.createChannel();
             })
                 // creating channel
@@ -74,33 +135,33 @@ class RabbitMQClient {
                 if (prefetch) {
                     this.channel.prefetch(prefetch || 1);
                 }
-                console.log(`Channel created on message server`);
+                this.log('info', 'Channel created on message server');
             })
                 // assert to queues
                 .then(() => {
                 const promises = [];
                 for (const queueConfig of queues) {
-                    this.queueToEventHandleMapping[queueConfig.name] = {};
-                    this.queueToEventCallbackMapping[queueConfig.name] = {};
-                    const queueListenersMap = this.queueToEventHandleMapping[queueConfig.name];
-                    const queueCallbacksMap = this.queueToEventCallbackMapping[queueConfig.name];
+                    const queueListenersMap = new Map();
+                    const queueCallbacksMap = new Map();
+                    this.queueToEventHandleMapping.set(queueConfig.name, queueListenersMap);
+                    this.queueToEventCallbackMapping.set(queueConfig.name, queueCallbacksMap);
                     // by default, create an observable stream on the queue for unidentified/null routing keys
-                    queueListenersMap[this.DEFAULT_LISTENER_TYPE] = new rxjs_1.ReplaySubject();
+                    queueListenersMap.set(this.DEFAULT_LISTENER_TYPE, new rxjs_1.ReplaySubject());
                     const useHandleMessageTypes = queueConfig.handleMessageTypes || [];
                     for (const messageType of useHandleMessageTypes) {
                         if (typeof messageType === 'string') {
-                            queueListenersMap[messageType] = new rxjs_1.ReplaySubject();
+                            queueListenersMap.set(messageType, new rxjs_1.ReplaySubject());
                         }
                         else {
                             const config = messageType;
-                            queueCallbacksMap[config.messageName] = config.callbackHandler;
+                            queueCallbacksMap.set(config.messageName, config.callbackHandler);
                         }
                     }
                     promises.push(this.channel.assertQueue(queueConfig.name, queueConfig.options));
                 }
                 return Promise.all(promises).then((values) => {
                     this.queues = (0, utils_1.mapify)(values, 'queue');
-                    console.log(`queues created on channel`);
+                    this.log('info', 'queues created on channel');
                 });
             })
                 // assert exchanges
@@ -108,7 +169,7 @@ class RabbitMQClient {
                 const promises = exchanges.map((config) => this.channel.assertExchange(config.name, config.type, config.options));
                 return Promise.all(promises).then(values => {
                     this.exchanges = (0, utils_1.mapify)(values, 'exchange');
-                    console.log(`exchanges created on channel`);
+                    this.log('info', 'exchanges created on channel');
                 });
             })
                 // apply bindings
@@ -117,26 +178,32 @@ class RabbitMQClient {
                 // bind the exclusive queue to all the exchanges
                 // const exclusiveBindings = bindings.map((config) => this.channel.bindQueue(this.EXCLUSIVE_QUEUE, config.exchange, config.routingKey));
                 return Promise.all(promises).then(values => {
-                    console.log(`bindings created on channel`);
+                    this.log('info', 'bindings created on channel');
                 });
             })
                 .then(() => {
-                console.log(`Client initialization complete; waiting for messages/events...\n`);
+                this.log('info', 'Client initialization complete; waiting for messages/events...');
                 // initialization complete; listen for connection issues to retry again
                 retryAttempts = this.clientInitConfig.retryAttempts;
                 this.connection.on("error", (err) => {
                     this.connectionErrorStream.next(err);
+                    this.log('error', 'RabbitMQ connection error', err);
+                    this.scheduleReconnect('RabbitMQ connection error');
                 });
                 this.connection.on("close", (err) => {
                     this.connectionCloseStream.next(err);
+                    this.log('warn', 'RabbitMQ connection closed', err);
+                    this.scheduleReconnect('RabbitMQ connection closed');
                 });
+                this.reconnectAttempts = 0;
                 this.isReady = true;
                 this.isReadyStream.next(true);
+                this.resubscribeToRegisteredQueues();
             })
                 .catch((error) => {
-                console.log(`connection error, retryAttempts: ${retryAttempts}`, error);
+                this.log('error', 'connection error, retryAttempts:', retryAttempts, error);
                 if (retryAttempts === 0) {
-                    console.log(`all retry attemptys exhaused; exiting...`);
+                    this.log('error', 'all retry attemptys exhaused; exiting...');
                     throw error;
                 }
                 retryAttempts = retryAttempts - 1;
@@ -145,16 +212,16 @@ class RabbitMQClient {
         };
         return (0, utils_1.wait)(delayStart || 0)
             .then(() => {
-            console.log(`Running pre init promises...`);
+            this.log('info', 'Running pre init promises...');
             return Promise.all((pre_init_promises === null || pre_init_promises === void 0 ? void 0 : pre_init_promises.map(p => p instanceof Promise ? p : p())) || []).then(() => {
-                console.log(`Done running pre init promises.\n`);
+                this.log('info', 'Done running pre init promises.');
             });
         })
             .then(init)
             .then(() => {
-            console.log(`Running post init promises...`);
+            this.log('info', 'Running post init promises...');
             return Promise.all((post_init_promises === null || post_init_promises === void 0 ? void 0 : post_init_promises.map(p => p instanceof Promise ? p : p())) || []).then(() => {
-                console.log(`Done running post init promises. \n\n-------\n\n`);
+                this.log('info', 'Done running post init promises.');
             });
         });
     }
@@ -168,6 +235,7 @@ class RabbitMQClient {
         return () => {
             // callback
             const handleCallback = (message) => {
+                var _a, _b;
                 if (!message) {
                     // console.log('Consumer cancelled by server');
                     // throw new Error('Consumer cancelled by server');
@@ -177,7 +245,11 @@ class RabbitMQClient {
                 // see if a listener was created for the routing key
                 const messageType = message.properties.type;
                 const useContentType = message.properties.contentType;
-                const useData = utils_1.SERIALIZERS[useContentType] ? utils_1.SERIALIZERS[useContentType].deserialize(message.content) : message.content;
+                const serializer = (0, utils_1.getSerializer)(useContentType || 'application/octet-stream');
+                const useData = serializer ? serializer.deserialize(message.content) : message.content;
+                if (this.metricsEnabled) {
+                    this.metrics.messagesReceived += 1;
+                }
                 const messageObj = {
                     data: useData,
                     message,
@@ -193,33 +265,38 @@ class RabbitMQClient {
                 // send message to queue stream
                 !!this.messagesStreamsByQueue[queue] && this.messagesStreamsByQueue[queue].next(messageObj);
                 // console.log(`Message on queue ${queue}:`, messageObj);
+                const queueListeners = (_a = this.queueToEventHandleMapping.get(queue)) !== null && _a !== void 0 ? _a : new Map();
+                const queueCallbacks = (_b = this.queueToEventCallbackMapping.get(queue)) !== null && _b !== void 0 ? _b : new Map();
                 if (!messageType) {
                     // no type key found, push to default stream
-                    console.log(`No message type found; pushing to default handler on queue ${queue}`);
-                    this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
+                    this.log('debug', `No message type found; pushing to default handler on queue ${queue}`);
+                    const defaultListener = queueListeners.get(this.DEFAULT_LISTENER_TYPE);
+                    defaultListener === null || defaultListener === void 0 ? void 0 : defaultListener.next(messageObj);
                     return;
                 }
-                if (this.queueToEventHandleMapping[queue][messageType]) {
+                const typeListener = queueListeners.get(messageType);
+                if (typeListener) {
                     // there is a registered listener for the type, push to that stream
-                    console.log(`message type handler found; pushing to ${messageType} handler on queue ${queue}`);
-                    this.queueToEventHandleMapping[queue][messageType].next(messageObj);
+                    this.log('debug', `message type handler found; pushing to ${messageType} handler on queue ${queue}`);
+                    typeListener.next(messageObj);
                 }
-                else if (this.queueToEventCallbackMapping[queue][messageType]) {
+                else if (queueCallbacks.has(messageType)) {
                     // there is a registered listener for the type, push to that stream
-                    console.log(`message type callback found; pushing to ${messageType} callback on queue ${queue}`);
-                    const callbackHandler = this.queueToEventCallbackMapping[queue][messageType];
+                    this.log('debug', `message type callback found; pushing to ${messageType} callback on queue ${queue}`);
+                    const callbackHandler = queueCallbacks.get(messageType);
                     callbackHandler(messageObj);
                 }
                 else {
                     // no registered listener
                     if (this.clientInitConfig.autoAckUnhandledMessageTypes) {
-                        console.log(`No handler found for message type ${messageType} on queue ${queue}; auto acknowledging.`);
+                        this.log('debug', `No handler found for message type ${messageType} on queue ${queue}; auto acknowledging.`);
                         this.ack(message);
                         return;
                     }
                     else if (this.clientInitConfig.pushUnhandledMessageTypesToDefaultHandler) {
-                        console.log(`No handler found for message type ${messageType} on queue ${queue}; pushing to ${this.DEFAULT_LISTENER_TYPE} handler.`);
-                        this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].next(messageObj);
+                        this.log('debug', `No handler found for message type ${messageType} on queue ${queue}; pushing to ${this.DEFAULT_LISTENER_TYPE} handler.`);
+                        const defaultListener = queueListeners.get(this.DEFAULT_LISTENER_TYPE);
+                        defaultListener === null || defaultListener === void 0 ? void 0 : defaultListener.next(messageObj);
                         return;
                     }
                     else {
@@ -233,10 +310,12 @@ class RabbitMQClient {
     }
     listenToQueue(queue, options) {
         if (this.queueListeners[queue]) {
-            console.log(`Already Registered messages/events listener for queue: ${queue}`);
+            this.log('debug', `Already Registered messages/events listener for queue: ${queue}`);
             return;
         }
-        console.log(`Registering messages/events listener for queue: ${queue}`);
+        this.registeredQueueConsumers = this.registeredQueueConsumers.filter((entry) => entry.queue !== queue);
+        this.registeredQueueConsumers.push({ queue, options });
+        this.log('info', `Registering messages/events listener for queue: ${queue}`);
         const startQueueListener = this.getQueueListener(queue, options);
         this.messagesStreamsByQueue[queue] = new rxjs_1.Subject();
         this.queueListeners[queue] = this.onReady.pipe((0, rxjs_1.tap)((readyState) => {
@@ -244,7 +323,7 @@ class RabbitMQClient {
         }))
             .subscribe({
             next: (readyState) => {
-                console.log(`Registered: Now listening to messages/events on queue ${queue}...`);
+                this.log('info', `Registered: Now listening to messages/events on queue ${queue}...`);
             }
         });
     }
@@ -253,14 +332,19 @@ class RabbitMQClient {
         this.listenToQueue(queue, options);
         const handle = (messageType) => {
             return this.onReady.pipe((0, rxjs_1.mergeMap)((ready, index) => {
-                if (!this.queueToEventHandleMapping[queue][messageType]) {
+                const queueListeners = this.queueToEventHandleMapping.get(queue);
+                if (!(queueListeners === null || queueListeners === void 0 ? void 0 : queueListeners.has(messageType))) {
                     throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
                 }
-                return this.queueToEventHandleMapping[queue][messageType].asObservable();
+                return queueListeners.get(messageType).asObservable();
             }));
         };
         const handleDefault = () => {
-            return this.onReady.pipe((0, rxjs_1.mergeMap)((ready, index) => this.queueToEventHandleMapping[queue][this.DEFAULT_LISTENER_TYPE].asObservable()));
+            return this.onReady.pipe((0, rxjs_1.mergeMap)((ready, index) => {
+                var _a;
+                const queueListeners = this.queueToEventHandleMapping.get(queue);
+                return ((_a = queueListeners === null || queueListeners === void 0 ? void 0 : queueListeners.get(this.DEFAULT_LISTENER_TYPE)) !== null && _a !== void 0 ? _a : new rxjs_1.ReplaySubject()).asObservable();
+            }));
         };
         /**
           Providing callback function approach
@@ -289,51 +373,149 @@ class RabbitMQClient {
     }
     ack(message) {
         this.channel.ack(message);
-        console.log(`Acknoledged rmq message.`);
+        if (this.metricsEnabled) {
+            this.metrics.messagesAcked += 1;
+        }
+        this.log('debug', 'Acknoledged rmq message.');
+    }
+    nack(message, requeue = true) {
+        if (!this.channel) {
+            return;
+        }
+        this.channel.nack(message, false, requeue);
+        if (this.metricsEnabled) {
+            this.metrics.messagesNacked += 1;
+        }
+        this.log('debug', `Nacknowledged rmq message with requeue=${requeue}.`);
+    }
+    retryMessage(message, options = {}) {
+        const { delayMs = 0, requeue = true, queue = '' } = options;
+        const targetQueue = queue || message.fields.routingKey || '';
+        if (delayMs > 0) {
+            setTimeout(() => {
+                if (targetQueue) {
+                    this.channel.sendToQueue(targetQueue, message.content, Object.assign({ persistent: true }, message.properties));
+                }
+            }, delayMs);
+        }
+        else if (targetQueue) {
+            this.channel.sendToQueue(targetQueue, message.content, Object.assign({ persistent: true }, message.properties));
+        }
+        this.nack(message, requeue);
+        if (this.metricsEnabled) {
+            this.metrics.messagesRetried += 1;
+        }
+    }
+    deadLetter(message, reason, queue) {
+        const targetQueue = queue || `${message.fields.routingKey || 'dead-letter'}.dlq`;
+        const headers = Object.assign(Object.assign({}, (message.properties.headers || {})), { 'x-death-reason': reason });
+        this.channel.sendToQueue(targetQueue, message.content, Object.assign(Object.assign({}, message.properties), { headers, persistent: true }));
+        this.nack(message, false);
+    }
+    close() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.reconnectTimeout) {
+                clearTimeout(this.reconnectTimeout);
+                this.reconnectTimeout = undefined;
+            }
+            if (this.channel) {
+                yield this.channel.close();
+            }
+            if (this.connection) {
+                yield this.connection.close();
+            }
+            this.isReady = false;
+            this.isReadyStream.next(false);
+            this.log('info', 'RabbitMQ client closed.');
+        });
     }
     sendMessage(options) {
         const send = () => {
             const { data, publishOptions, queue } = options;
             const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const useData = utils_1.SERIALIZERS[useContentType] ? utils_1.SERIALIZERS[useContentType].serialize(data) : data;
+            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useData = serializer
+                ? serializer.serialize(data)
+                : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
+            if (this.metricsEnabled) {
+                this.metrics.messagesPublished += 1;
+            }
             this.channel.sendToQueue(queue, useData, Object.assign(Object.assign({}, publishOptions), { appId: publishOptions.appId }));
         };
         if (!this.isReady) {
-            console.log(`wait until ready to send message...`);
+            this.log('debug', 'wait until ready to send message...');
             (0, rxjs_1.firstValueFrom)(this.onReady).then((readyState) => {
-                console.log(`now ready to send message`, { readyState });
+                this.log('debug', 'now ready to send message', { readyState });
                 send();
             });
         }
         else {
-            console.log(`is ready to send message`);
+            this.log('debug', 'is ready to send message');
             send();
         }
     }
-    getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply) {
+    getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply, requestTimeoutMs) {
+        var _a;
         const start_time = Date.now();
         const consumerTag = (0, utils_1.uniqueValue)();
         const correlationId = options.publishOptions.correlationId || (0, uuid_1.v4)();
+        const timeoutMs = (_a = requestTimeoutMs !== null && requestTimeoutMs !== void 0 ? requestTimeoutMs : this.clientInitConfig.rpcRequestTimeoutMs) !== null && _a !== void 0 ? _a : 30000;
         const send = () => {
             const { data, publishOptions, queue } = options;
             const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const useData = utils_1.SERIALIZERS[useContentType] ? utils_1.SERIALIZERS[useContentType].serialize(data) : data;
+            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useData = serializer
+                ? serializer.serialize(data)
+                : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
+            if (this.metricsEnabled) {
+                this.metrics.rpcRequests += 1;
+            }
             this.channel.sendToQueue(queue, useData, Object.assign(Object.assign({}, publishOptions), { correlationId, replyTo: temporaryRpcQueue, appId: publishOptions.appId }));
         };
         const watch = () => {
             return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
-                console.log(`request/rpc sent; awaiting response...`, { correlationId, consumerTag, temporaryRpcQueue });
+                let settled = false;
+                let timeoutHandle;
+                const cleanup = () => __awaiter(this, void 0, void 0, function* () {
+                    if (timeoutHandle) {
+                        clearTimeout(timeoutHandle);
+                    }
+                    try {
+                        yield this.channel.cancel(consumerTag);
+                    }
+                    catch (error) {
+                        this.log('debug', 'Ignoring cancel failure for RPC consumer', { consumerTag, error });
+                    }
+                });
+                timeoutHandle = setTimeout(() => __awaiter(this, void 0, void 0, function* () {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    yield cleanup();
+                    reject(new Error(`RabbitMQ request timed out after ${timeoutMs}ms for correlationId ${correlationId}`));
+                }), timeoutMs);
+                this.log('debug', 'request/rpc sent; awaiting response...', { correlationId, consumerTag, temporaryRpcQueue });
                 const replyHandler = (message) => {
-                    console.log(`\nReceived reply.\n`, { message });
+                    if (!message || settled) {
+                        return;
+                    }
+                    this.log('debug', 'Received reply.', { message });
                     const correlationIdMatch = message.properties.correlationId == correlationId;
                     const isReplyToRequest = !!message && correlationIdMatch;
-                    console.log({ isReplyToRequest, consumerTag, correlationIdMatch, requestCorrelationId: correlationId, responseCorrelationId: message.properties.correlationId });
+                    this.log('debug', { isReplyToRequest, consumerTag, correlationIdMatch, requestCorrelationId: correlationId, responseCorrelationId: message.properties.correlationId });
                     if (isReplyToRequest) {
+                        settled = true;
+                        void cleanup();
                         const useContentType = message.properties.contentType;
-                        const useData = utils_1.SERIALIZERS[useContentType] ? utils_1.SERIALIZERS[useContentType].deserialize(message.content) : message.content;
+                        const serializer = (0, utils_1.getSerializer)(useContentType || 'application/octet-stream') || utils_1.SERIALIZERS[useContentType || 'application/octet-stream'];
+                        const useData = serializer ? serializer.deserialize(message.content) : message.content;
+                        if (this.metricsEnabled) {
+                            this.metrics.rpcResponses += 1;
+                        }
                         const messageObj = {
                             data: useData,
-                            message: message,
+                            message,
                             ack: () => {
                                 this.ack(message);
                             },
@@ -344,7 +526,7 @@ class RabbitMQClient {
                         const end_time = Date.now();
                         const total_time = (end_time - start_time) / 1000;
                         const time_in_seconds = total_time.toFixed();
-                        console.log(`received response from request/rpc:`, { start_time, end_time, total_time, time_in_seconds, messageObj, options });
+                        this.log('debug', 'received response from request/rpc:', { start_time, end_time, total_time, time_in_seconds, messageObj, options });
                         if (autoAckOnReceiveReply) {
                             this.ack(message);
                         }
@@ -356,32 +538,32 @@ class RabbitMQClient {
         };
         return { watch, send };
     }
-    sendRequest(options, autoAckOnReceiveReply = true) {
-        console.log(`sendRequest:`, options);
+    sendRequest(options, autoAckOnReceiveReply = true, timeoutMs) {
+        this.log('debug', 'sendRequest:', options);
         return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
             const temporaryRpcQueue = (0, uuid_1.v1)();
             const newQueue = yield this.channel.assertQueue(temporaryRpcQueue, { exclusive: true, durable: false, autoDelete: true }).then((response) => {
-                console.log(`Created temp queue ${temporaryRpcQueue} for client.`);
+                this.log('debug', `Created temp queue ${temporaryRpcQueue} for client.`);
                 return response;
             });
-            const rpc = this.getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply);
+            const rpc = this.getRpcMethods(temporaryRpcQueue, options, autoAckOnReceiveReply, timeoutMs);
             if (!this.isReady) {
-                console.log(`waiting until ready to send request`);
+                this.log('debug', 'waiting until ready to send request');
                 (0, rxjs_1.firstValueFrom)(this.onReady).then((readyState) => {
-                    console.log(`now ready and watching temp queue`, { readyState });
+                    this.log('debug', 'now ready and watching temp queue', { readyState });
                     rpc.watch().then((message) => {
                         resolve(message);
-                    }); // first listen on the reply queue
-                    console.log(`sending request`);
+                    }).catch(reject); // first listen on the reply queue
+                    this.log('debug', 'sending request');
                     rpc.send(); // then send the rpc/rmq message
-                });
+                }).catch(reject);
             }
             else {
-                console.log(`now ready and watching temp queue`);
+                this.log('debug', 'now ready and watching temp queue');
                 rpc.watch().then((message) => {
                     resolve(message);
-                }); // first listen on the reply queue
-                console.log(`sending request`);
+                }).catch(reject); // first listen on the reply queue
+                this.log('debug', 'sending request');
                 rpc.send(); // then send the rpc/rmq message
             }
         }));
@@ -390,20 +572,26 @@ class RabbitMQClient {
         const publish = () => {
             const { data, routingKey, publishOptions, exchange } = options;
             const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const useData = utils_1.SERIALIZERS[useContentType] ? utils_1.SERIALIZERS[useContentType].serialize(data) : data;
+            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useData = serializer
+                ? serializer.serialize(data)
+                : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
+            if (this.metricsEnabled) {
+                this.metrics.messagesPublished += 1;
+            }
             this.channel.publish(exchange, routingKey || '', useData, Object.assign(Object.assign({}, publishOptions), { appId: publishOptions.appId }));
         };
         if (!this.isReady) {
-            console.log(`wait until ready to publish event`);
+            this.log('debug', 'wait until ready to publish event');
             this.onReady.subscribe({
                 next: () => {
-                    console.log(`now ready to publish event`);
+                    this.log('debug', 'now ready to publish event');
                     publish();
                 }
             });
         }
         else {
-            console.log(`is ready to publish event`);
+            this.log('debug', 'is ready to publish event');
             publish();
         }
     }

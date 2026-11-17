@@ -10,7 +10,7 @@
     "tsc": "tsc",
     "build": "tsc",
     "prepublish": "tsc",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run build && node --test test/*.test.js"
   },
   "author": "Ryan M. Waite",
   "license": "ISC",
