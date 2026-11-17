@@ -412,6 +412,50 @@ class RabbitMQClient {
         this.channel.sendToQueue(targetQueue, message.content, Object.assign(Object.assign({}, message.properties), { headers, persistent: true }));
         this.nack(message, false);
     }
+    setupDeadLetterQueue(config) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const { sourceQueue, deadLetterQueue = `${sourceQueue}.dlq`, deadLetterExchange = `${sourceQueue}.dlx`, deadLetterRoutingKey = deadLetterQueue, queueOptions = {}, deadLetterQueueOptions = { durable: true }, maxLength, messageTtlMs, } = config;
+            const dlxArguments = Object.assign(Object.assign({}, (maxLength ? { 'x-max-length': maxLength } : {})), (messageTtlMs ? { 'x-message-ttl': messageTtlMs } : {}));
+            yield this.channel.assertExchange(deadLetterExchange, 'direct', { durable: true });
+            yield this.channel.assertQueue(deadLetterQueue, Object.assign(Object.assign({ durable: true }, deadLetterQueueOptions), { arguments: Object.assign(Object.assign({}, (deadLetterQueueOptions.arguments || {})), dlxArguments) }));
+            yield this.channel.bindQueue(deadLetterQueue, deadLetterExchange, deadLetterRoutingKey);
+            const sourceQueueArguments = Object.assign(Object.assign({}, (queueOptions.arguments || {})), { 'x-dead-letter-exchange': deadLetterExchange, 'x-dead-letter-routing-key': deadLetterRoutingKey });
+            yield this.channel.assertQueue(sourceQueue, Object.assign(Object.assign({}, queueOptions), { arguments: sourceQueueArguments }));
+            return {
+                sourceQueue,
+                deadLetterQueue,
+                deadLetterExchange,
+                deadLetterRoutingKey,
+            };
+        });
+    }
+    handleMessageError(message, error, options = {}) {
+        var _a, _b;
+        const { reason = error instanceof Error ? error.message : 'unknown_error', requeue = false, deadLetterQueue, deadLetterExchange, deadLetterRoutingKey, retryQueue, retryDelayMs, loggerMessage = 'RabbitMQ message processing failed', } = options;
+        this.log('error', loggerMessage, {
+            reason,
+            error,
+            routingKey: (_a = message === null || message === void 0 ? void 0 : message.fields) === null || _a === void 0 ? void 0 : _a.routingKey,
+            queue: (_b = message === null || message === void 0 ? void 0 : message.fields) === null || _b === void 0 ? void 0 : _b.routingKey,
+        });
+        if (retryQueue && retryDelayMs && retryDelayMs > 0) {
+            const targetQueue = retryQueue;
+            setTimeout(() => {
+                if (this.channel) {
+                    this.channel.sendToQueue(targetQueue, message.content, Object.assign(Object.assign({}, message.properties), { persistent: true }));
+                }
+            }, retryDelayMs);
+            this.nack(message, false);
+            return { action: 'retry', targetQueue, retryDelayMs };
+        }
+        if (deadLetterQueue || deadLetterExchange || deadLetterRoutingKey) {
+            const targetQueue = deadLetterQueue || `${message.fields.routingKey || 'dead-letter'}.dlq`;
+            this.deadLetter(message, reason, targetQueue);
+            return { action: 'dead-letter', targetQueue };
+        }
+        this.nack(message, requeue);
+        return { action: 'nack', requeue };
+    }
     close() {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.reconnectTimeout) {

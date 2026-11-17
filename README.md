@@ -250,6 +250,53 @@ client.deadLetter(event.message, 'processing failed', 'emails.dlq');
 
 These helpers are intentionally opt-in and explicit; they avoid forcing a policy onto all consumers.
 
+### Dead-letter queue setup and centralized error handling
+
+For production workloads, it is often easier to define the DLQ topology once and then route failures through a single helper.
+
+```ts
+await client.setupDeadLetterQueue({
+  sourceQueue: 'emails',
+  deadLetterQueue: 'emails.dlq',
+  deadLetterExchange: 'emails.dlx',
+  deadLetterRoutingKey: 'emails.dlq',
+  queueOptions: { durable: true },
+  deadLetterQueueOptions: { durable: true },
+  messageTtlMs: 5000
+});
+```
+
+This config creates a dead-letter exchange and binds it to a dedicated DLQ, while also attaching the DLX metadata to the source queue so RabbitMQ can move failed work automatically.
+
+For handling processing failures inside a consumer, prefer a centralized helper rather than duplicating retry logic in each handler:
+
+```ts
+client.onQueue('emails').handle('SEND_EMAIL').subscribe({
+  next: (event) => {
+    try {
+      // process message
+      event.ack();
+    } catch (error) {
+      client.handleMessageError(event.message, error, {
+        reason: 'email processing failed',
+        deadLetterQueue: 'emails.dlq',
+        retryQueue: 'emails.retry',
+        retryDelayMs: 2000,
+        requeue: false
+      });
+    }
+  }
+});
+```
+
+The helper returns an action summary and keeps the failure policy explicit:
+
+- `retry`: requeue the message to a retry queue after a delay
+- `dead-letter`: move the message into the configured DLQ
+- `nack`: reject the message and optionally requeue it
+
+This makes it easier to keep error handling consistent across queues without burying RabbitMQ semantics deep inside business logic.
+
 ## Serialization
 
 The library includes a built-in serializer registry in `SERIALIZERS` and supports custom registration.

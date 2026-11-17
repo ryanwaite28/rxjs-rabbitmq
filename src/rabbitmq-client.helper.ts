@@ -38,6 +38,8 @@ import {
 } from "./utils";
 
 import {
+  DeadLetterQueueConfig,
+  HandleMessageErrorOptions,
   MapType,
   QueueExchangeBindingConfig,
   RabbitMqInitConfig,
@@ -546,6 +548,96 @@ export class RabbitMQClient {
       persistent: true,
     });
     this.nack(message, false);
+  }
+
+  async setupDeadLetterQueue(config: DeadLetterQueueConfig) {
+    const {
+      sourceQueue,
+      deadLetterQueue = `${sourceQueue}.dlq`,
+      deadLetterExchange = `${sourceQueue}.dlx`,
+      deadLetterRoutingKey = deadLetterQueue,
+      queueOptions = {},
+      deadLetterQueueOptions = { durable: true },
+      maxLength,
+      messageTtlMs,
+    } = config;
+
+    const dlxArguments: Record<string, unknown> = {
+      ...(maxLength ? { 'x-max-length': maxLength } : {}),
+      ...(messageTtlMs ? { 'x-message-ttl': messageTtlMs } : {}),
+    };
+
+    await this.channel.assertExchange(deadLetterExchange, 'direct', { durable: true });
+    await this.channel.assertQueue(deadLetterQueue, {
+      durable: true,
+      ...deadLetterQueueOptions,
+      arguments: {
+        ...(deadLetterQueueOptions.arguments || {}),
+        ...dlxArguments,
+      },
+    });
+    await this.channel.bindQueue(deadLetterQueue, deadLetterExchange, deadLetterRoutingKey);
+
+    const sourceQueueArguments = {
+      ...(queueOptions.arguments || {}),
+      'x-dead-letter-exchange': deadLetterExchange,
+      'x-dead-letter-routing-key': deadLetterRoutingKey,
+    };
+
+    await this.channel.assertQueue(sourceQueue, {
+      ...queueOptions,
+      arguments: sourceQueueArguments,
+    });
+
+    return {
+      sourceQueue,
+      deadLetterQueue,
+      deadLetterExchange,
+      deadLetterRoutingKey,
+    };
+  }
+
+  handleMessageError(message: ConsumeMessage, error: unknown, options: HandleMessageErrorOptions = {}) {
+    const {
+      reason = error instanceof Error ? error.message : 'unknown_error',
+      requeue = false,
+      deadLetterQueue,
+      deadLetterExchange,
+      deadLetterRoutingKey,
+      retryQueue,
+      retryDelayMs,
+      loggerMessage = 'RabbitMQ message processing failed',
+    } = options;
+
+    this.log('error', loggerMessage, {
+      reason,
+      error,
+      routingKey: message?.fields?.routingKey,
+      queue: message?.fields?.routingKey,
+    });
+
+    if (retryQueue && retryDelayMs && retryDelayMs > 0) {
+      const targetQueue = retryQueue;
+      setTimeout(() => {
+        if (this.channel) {
+          this.channel.sendToQueue(targetQueue, message.content, {
+            ...message.properties,
+            persistent: true,
+          });
+        }
+      }, retryDelayMs);
+      this.nack(message, false);
+      return { action: 'retry' as const, targetQueue, retryDelayMs };
+    }
+
+    if (deadLetterQueue || deadLetterExchange || deadLetterRoutingKey) {
+      const targetQueue = deadLetterQueue || `${message.fields.routingKey || 'dead-letter'}.dlq`;
+      this.deadLetter(message, reason, targetQueue);
+      return { action: 'dead-letter' as const, targetQueue };
+    }
+
+    this.nack(message, requeue);
+    return { action: 'nack' as const, requeue };
   }
 
   async close() {

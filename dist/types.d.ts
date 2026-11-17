@@ -81,6 +81,26 @@ export interface QueueExchangeBindingConfig {
     */
     routingKey: string;
 }
+export type DeadLetterQueueConfig = {
+    sourceQueue: string;
+    deadLetterQueue?: string;
+    deadLetterExchange?: string;
+    deadLetterRoutingKey?: string;
+    queueOptions?: Options.AssertQueue;
+    deadLetterQueueOptions?: Options.AssertQueue;
+    maxLength?: number;
+    messageTtlMs?: number;
+};
+export type HandleMessageErrorOptions = {
+    reason?: string;
+    requeue?: boolean;
+    deadLetterQueue?: string;
+    deadLetterExchange?: string;
+    deadLetterRoutingKey?: string;
+    retryQueue?: string;
+    retryDelayMs?: number;
+    loggerMessage?: string;
+};
 export type RmqEventRequestResponse<T = any> = Promise<RmqEventMessage<T>>;
 export type RmqSendMessageParams<T = unknown> = {
     queue: string;

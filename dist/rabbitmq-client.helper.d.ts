@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { Connection, Channel, Options, ConsumeMessage } from "amqplib";
 import { Observable, Subscription } from "rxjs";
-import { RabbitMqInitConfig, RmqEventHandler, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams } from "./types";
+import { DeadLetterQueueConfig, HandleMessageErrorOptions, RabbitMqInitConfig, RmqEventHandler, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams } from "./types";
 export type RmgOnEventHandler = (event: RmqEventMessage, rmqClient?: RabbitMQClient) => void;
 /**
   Rabbit MQ - RxJS Powered
@@ -71,6 +71,28 @@ export declare class RabbitMQClient {
         queue?: string;
     }): void;
     deadLetter(message: ConsumeMessage, reason: string, queue?: string): void;
+    setupDeadLetterQueue(config: DeadLetterQueueConfig): Promise<{
+        sourceQueue: string;
+        deadLetterQueue: string;
+        deadLetterExchange: string;
+        deadLetterRoutingKey: string;
+    }>;
+    handleMessageError(message: ConsumeMessage, error: unknown, options?: HandleMessageErrorOptions): {
+        action: "retry";
+        targetQueue: string;
+        retryDelayMs: number;
+        requeue?: undefined;
+    } | {
+        action: "dead-letter";
+        targetQueue: string;
+        retryDelayMs?: undefined;
+        requeue?: undefined;
+    } | {
+        action: "nack";
+        requeue: boolean;
+        targetQueue?: undefined;
+        retryDelayMs?: undefined;
+    };
     close(): Promise<void>;
     sendMessage(options: RmqSendMessageParams): void;
     private getRpcMethods;
