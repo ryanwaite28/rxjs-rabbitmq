@@ -113,3 +113,110 @@ test('dead letter setup and error handling can be configured through the client 
   assert.equal(outcome.action, 'dead-letter');
   assert.equal(calls.some((call) => call[0] === 'sendToQueue' && call[1] === 'jobs.dlq'), true);
 });
+
+test('constructor serializers are instance scoped and used automatically', () => {
+  const contentType = 'application/instance-test';
+  const serializer = {
+    serialize: (value) => Buffer.from(`instance:${JSON.stringify(value)}`),
+    deserialize: (bytes) => bytes.toString('utf8').replace(/^instance:/, '')
+  };
+
+  const client = new RabbitMQClient({
+    stopAutoInit: true,
+    connection_url: 'amqp://localhost',
+    retryAttempts: 1,
+    retryDelay: 10,
+    defaultContentType: contentType,
+    serializers: { [contentType]: serializer },
+    queues: [],
+    exchanges: [],
+    bindings: []
+  });
+
+  let sentPayload;
+  client.channel = {
+    sendToQueue: (queue, content, options) => {
+      sentPayload = { queue, content, options };
+      return true;
+    }
+  };
+  client.isReady = true;
+
+  client.sendMessage({
+    queue: 'jobs',
+    data: { ok: true },
+    publishOptions: {}
+  });
+
+  assert.equal(sentPayload.content.toString('utf8'), 'instance:{"ok":true}');
+
+  let consumeHandler;
+  const incomingMessage = {
+    fields: { routingKey: 'jobs' },
+    properties: { contentType, headers: {} },
+    content: Buffer.from('instance:{"ok":true}')
+  };
+
+  client.channel = {
+    consume: (queue, handler) => {
+      consumeHandler = handler;
+      return Promise.resolve({ consumerTag: 'serializer-test' });
+    }
+  };
+
+  let event;
+  client.onMessage.subscribe((received) => { event = received; });
+  client.getQueueListener('jobs')();
+  consumeHandler(incomingMessage);
+
+  assert.equal(event.data, '{"ok":true}');
+});
+
+test('event messages expose client convenience methods', () => {
+  const client = new RabbitMQClient({
+    stopAutoInit: true,
+    metrics: false,
+    connection_url: 'amqp://localhost',
+    retryAttempts: 1,
+    retryDelay: 10,
+    queues: [],
+    exchanges: [],
+    bindings: []
+  });
+
+  let consumeHandler;
+  client.channel = {
+    consume: (queue, handler) => {
+      consumeHandler = handler;
+      return Promise.resolve({ consumerTag: 'test-consumer' });
+    },
+    nack: (message, allUpTo, requeue) => {
+      message.testNackRequeue = requeue;
+    },
+    sendToQueue: () => true,
+  };
+
+  const received = [];
+  client.onMessage.subscribe((event) => received.push(event));
+  client.getQueueListener('jobs')();
+
+  const message = {
+    fields: { routingKey: 'jobs' },
+    properties: { headers: {}, contentType: 'application/octet-stream' },
+    content: Buffer.from('test')
+  };
+
+  consumeHandler(message);
+
+  assert.equal(received.length, 1);
+  assert.equal(typeof received[0].nack, 'function');
+  assert.equal(typeof received[0].retry, 'function');
+  assert.equal(typeof received[0].handlerError, 'function');
+
+  received[0].nack(false);
+  assert.equal(message.testNackRequeue, false);
+
+  const outcome = received[0].handlerError(new Error('failed'), { requeue: true });
+  assert.equal(outcome.action, 'nack');
+  assert.equal(outcome.requeue, true);
+});

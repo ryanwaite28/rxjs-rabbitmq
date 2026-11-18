@@ -11,18 +11,27 @@ import {
 
 export type MapType<T = any> = { [key:string]: T };
 
-export type RmqMessageTypeHandler = (event: RmqEventMessage) => Promise<void> | void;
-export type RmqHandleMessageTypeConfig = { messageName: string, callbackHandler: RmqMessageTypeHandler };
-export type RmqHandleMessageTypeConfigs = string[] | RmqHandleMessageTypeConfig[];
+export type RmqPayloadMap = Record<string, unknown>;
+export type RmqMessageTypeHandler<TPayload = unknown, QueueName extends string = string, ExchangeName extends string = string, RoutingKey extends string = string> = (event: RmqEventMessage<TPayload, QueueName, ExchangeName, RoutingKey>) => Promise<void> | void;
+export type RmqHandleMessageTypeConfig<MessageName extends string = string, TPayload = unknown, QueueName extends string = string, ExchangeName extends string = string, RoutingKey extends string = string> = {
+  messageName: MessageName,
+  callbackHandler: RmqMessageTypeHandler<TPayload, QueueName, ExchangeName, RoutingKey>
+};
+export type RmqHandleMessageTypeConfigs<MessageName extends string = string, TPayloadMap extends RmqPayloadMap = RmqPayloadMap, QueueName extends string = string, ExchangeName extends string = string, RoutingKey extends string = string> =
+  readonly (MessageName | RmqHandleMessageTypeConfig<MessageName, TPayloadMap[MessageName], QueueName, ExchangeName, RoutingKey>)[];
 export type ExchangeType = 'direct' | 'topic' | 'headers' | 'fanout';
 export type RmqPayload = unknown;
 
 
-export interface QueueConfig {
+export interface QueueConfig<
+  QueueName extends string = string,
+  MessageName extends string = string,
+  TPayloadMap extends RmqPayloadMap = RmqPayloadMap
+> {
   /**
     The name of the queue you want to consume messages from
   */
-  name: string,
+  name: QueueName,
 
   /** 
     the events to handle on the queue via the message.properties.type value. 
@@ -33,7 +42,7 @@ export interface QueueConfig {
     This approach is if you want to consolidate different events into a single queue; it is possible to 
     have a dedicated queue for specific events such as a `CREATE_USER` queue, hence why this property is optional.
   */
-  handleMessageTypes?: RmqHandleMessageTypeConfigs,
+  handleMessageTypes?: RmqHandleMessageTypeConfigs<MessageName, TPayloadMap, QueueName, string, string>,
 
   /* 
     Other options for queue
@@ -50,11 +59,11 @@ export interface QueueConfig {
   This is usually defined for a producer to publish event messages 
   and how queues are allowed to receive messages from the exchange (based on the exchange type).
 */
-export interface ExchangeConfig {
+export interface ExchangeConfig<ExchangeName extends string = string> {
   /**
     The name of the exchange
   */
-  name: string,
+  name: ExchangeName,
 
   /**
     The exchange type.
@@ -62,16 +71,10 @@ export interface ExchangeConfig {
     - `direct`: deliver to queue(s) based on EXACT matching routing key
     - `topic`: deliver to queue(s) based on PATTERN matching routing key
     - `headers`: deliver to queue(s) based on HEADERS
-    - `direct`: deliver to queue(s); ignore routing
-
-    The `topic` type is the most flexible because it can function as both a `direct` and `fanout`,
-    giving consumers more ways to filter the messages from an exchange.
+    - `fanout`: deliver to all bound queues
   */
   type: ExchangeType,
 
-  /**
-    Other options for exchange
-  */
   options?: Options.AssertExchange
 }
 
@@ -82,21 +85,25 @@ export interface ExchangeConfig {
 
   It is usually defined for a consumer to request messages from an exchange to a queue they are consuming/listening on
 */
-export interface QueueExchangeBindingConfig {
+export interface QueueExchangeBindingConfig<
+  QueueName extends string = string,
+  ExchangeName extends string = string,
+  RoutingKey extends string = string
+> {
   /**
     The queue for the consumer to receive messages in
   */
-  queue: string,
+  queue: QueueName,
 
   /**
     The exchange for the consumer to request messages from
   */
-  exchange: string,
+  exchange: ExchangeName,
 
   /**
     The key for the consumer to filter the messages on
   */
-  routingKey: string
+  routingKey: RoutingKey
 }
 
 export type DeadLetterQueueConfig = {
@@ -123,35 +130,67 @@ export type HandleMessageErrorOptions = {
 
 export type RmqEventRequestResponse <T = any> = Promise<RmqEventMessage<T>>;
 
-export type RmqSendMessageParams<T = unknown> = {
-  queue: string,
+export type RmqSendMessageParams<
+  T = unknown,
+  QueueName extends string = string
+> = {
+  queue: QueueName,
   data: T,
   publishOptions: Options.Publish
 }
 
-export type RmqSendRequestParams<T = unknown> = {
-  queue: string,
+export type RmqSendRequestParams<
+  T = unknown,
+  QueueName extends string = string
+> = {
+  queue: QueueName,
   data: T,
   publishOptions: Options.Publish,
 }
 
-export type RmqPublishEventParams<T = unknown> = {
-  exchange: string,
+export type RmqPublishEventParams<
+  T = unknown,
+  ExchangeName extends string = string,
+  RoutingKey extends string = string
+> = {
+  exchange: ExchangeName,
   data: T,
-  routingKey?: string,
+  routingKey?: RoutingKey,
   publishOptions: Options.Publish
 }
 
-export type RmqEventMessage<T = unknown> = {
+export type RmqRetryMessageOptions<QueueName extends string = string> = {
+  delayMs?: number,
+  requeue?: boolean,
+  queue?: QueueName,
+};
+
+export type RmqEventMessage<
+  T = unknown,
+  QueueName extends string = string,
+  ExchangeName extends string = string,
+  RoutingKey extends string = string
+> = {
   data: T,
   message: ConsumeMessage,
   ack: () => void;
-  publishEvent: (options: RmqPublishEventParams) => void,
-  sendMessage: <U = unknown>(options: RmqSendMessageParams<U>) => void,
-  sendRequest: <U = unknown>(options: RmqSendRequestParams<U>) => Promise<RmqEventMessage<U>>,
+  nack: (requeue?: boolean) => void,
+  retry: (options?: RmqRetryMessageOptions<QueueName>) => void,
+  handlerError: (
+    error: unknown,
+    options?: HandleMessageErrorOptions
+  ) => {
+    action: 'retry' | 'dead-letter' | 'nack',
+    targetQueue?: string,
+    retryDelayMs?: number,
+    requeue?: boolean,
+  },
+  publishEvent: <P = unknown>(options: RmqPublishEventParams<P, ExchangeName, RoutingKey>) => void,
+  sendMessage: <U = unknown>(options: RmqSendMessageParams<U, QueueName>) => void,
+  sendRequest: <U = unknown>(options: RmqSendRequestParams<U, QueueName>) => Promise<RmqEventMessage<U, QueueName, ExchangeName, RoutingKey>>,
 };
 
-export type RmqEventHandler = (event: RmqEventMessage) => unknown;
+export type RmqEventHandler<TPayload = unknown, QueueName extends string = string, ExchangeName extends string = string, RoutingKey extends string = string> = (event: RmqEventMessage<TPayload, QueueName, ExchangeName, RoutingKey>) => unknown;
 
 export type AckFn = (message: Message) => void;
 
@@ -183,7 +222,13 @@ export type RabbitMqSerializerMap = Record<string, RabbitMqSerializer>;
 /**
     
 */
-export type RabbitMqInitConfig = {
+export type RabbitMqInitConfig<
+  QueueName extends string = string,
+  ExchangeName extends string = string,
+  RoutingKey extends string = string,
+  MessageName extends string = string,
+  TPayloadMap extends RmqPayloadMap = RmqPayloadMap
+> = {
   /**
     Stop the constructor from automatically initializing the setup process.
     Allows for manually initializing later.
@@ -195,26 +240,16 @@ export type RabbitMqInitConfig = {
   logger?: Partial<RabbitMqLogger>,
   metrics?: boolean,
   rpcRequestTimeoutMs?: number,
+  serializers?: RabbitMqSerializerMap,
+  defaultContentType?: string,
   delayStart?: number,
   connection_url: string,
   retryAttempts: number,
-  retryDelay: number
+  retryDelay: number,
   prefetch?: number,
-
-  /**
-    The queues to assert on this client 
-  */
-  queues: Array<QueueConfig>,
-  /**
-    The exchanges to assert on this client
-  */
-  exchanges: Array<ExchangeConfig>,
-
-  /**
-    The bindings to assert on this client
-  */
-  bindings: Array<QueueExchangeBindingConfig>,
-
+  queues: Array<QueueConfig<QueueName, MessageName, TPayloadMap>>,
+  exchanges: Array<ExchangeConfig<ExchangeName>>,
+  bindings: Array<QueueExchangeBindingConfig<QueueName, ExchangeName, RoutingKey>>,
   pre_init_promises?: (Promise<any> | (() => Promise<any>))[],
   post_init_promises?: (Promise<any> | (() => Promise<any>))[],
 };

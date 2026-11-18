@@ -50,7 +50,12 @@ import {
   RmqHandleMessageTypeConfigs,
   RmqMessageTypeHandler,
   RmqPublishEventParams,
-  RmqSendMessageParams
+  RmqSendMessageParams,
+  RmqSendRequestParams,
+  RmqPayloadMap,
+  RmqRetryMessageOptions,
+  RabbitMqSerializer,
+  RabbitMqSerializerMap
 } from "./types";
 
 import { ContentTypes } from "./enums";
@@ -63,8 +68,14 @@ export type RmgOnEventHandler = (event: RmqEventMessage, rmqClient?: RabbitMQCli
 /**
   Rabbit MQ - RxJS Powered
 */
-export class RabbitMQClient {
-  private clientInitConfig: RabbitMqInitConfig;
+export class RabbitMQClient<
+  QueueName extends string = string,
+  ExchangeName extends string = string,
+  RoutingKey extends string = string,
+  MessageName extends string = string,
+  TPayloadMap extends RmqPayloadMap = RmqPayloadMap
+> {
+  private clientInitConfig: RabbitMqInitConfig<QueueName, ExchangeName, RoutingKey, MessageName, TPayloadMap>;
   private logger: RabbitMqLogger;
 
   private connection: Connection;
@@ -74,17 +85,18 @@ export class RabbitMQClient {
   private connectionErrorStream: Subject<any> = new Subject<any>();
   private connectionCloseStream: Subject<any> = new Subject<any>();
   private reconnectTimeout: ReturnType<typeof setTimeout> | undefined;
+  private serializers: RabbitMqSerializerMap = {};
   private reconnectAttempts: number = 0;
   
   /*
     Handle all messages from all queues on this client
   */
-  private messagesStream: Subject<RmqEventMessage> = new Subject<RmqEventMessage>();
-  private messagesStreamsByQueue: MapType<Subject<RmqEventMessage>> = {};
+  private messagesStream: Subject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>> = new Subject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>();
+  private messagesStreamsByQueue: MapType<Subject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>> = {};
 
   private queues: MapType<Replies.AssertQueue> = {};
   private exchanges:MapType<Replies.AssertExchange> = {};
-  private bindings: QueueExchangeBindingConfig[] = [];
+  private bindings: QueueExchangeBindingConfig<QueueName, ExchangeName, RoutingKey>[] = [];
 
   private DEFAULT_LISTENER_TYPE: string = '__default';
   private queueListeners: MapType<Subscription> = {};
@@ -110,8 +122,8 @@ export class RabbitMQClient {
     reconnects: 0,
   };
   
-  private queueToEventHandleMapping: Map<string, Map<string, ReplaySubject<RmqEventMessage>>> = new Map();
-  private queueToEventCallbackMapping: Map<string, Map<string, RmqMessageTypeHandler>> = new Map();
+  private queueToEventHandleMapping: Map<string, Map<string, ReplaySubject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>>> = new Map();
+  private queueToEventCallbackMapping: Map<string, Map<string, RmqMessageTypeHandler<unknown>>> = new Map();
 
   private log(level: keyof RabbitMqLogger, ...args: unknown[]) {
     const handler = this.logger[level] || (() => undefined);
@@ -133,12 +145,13 @@ export class RabbitMQClient {
     return this.connectionCloseStream.asObservable();
   }
 
-  get onMessage(): Observable<RmqEventMessage> {
+  get onMessage(): Observable<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>> {
     return this.messagesStream.asObservable();
   }
 
-  constructor(clientInitConfig: RabbitMqInitConfig) {
+  constructor(clientInitConfig: RabbitMqInitConfig<QueueName, ExchangeName, RoutingKey, MessageName, TPayloadMap>) {
     this.clientInitConfig = clientInitConfig;
+    this.serializers = { ...(clientInitConfig.serializers || {}) };
     this.metricsEnabled = !!clientInitConfig.metrics;
     this.logger = {
       debug: clientInitConfig.logger?.debug ?? (() => undefined),
@@ -149,8 +162,27 @@ export class RabbitMQClient {
     !clientInitConfig.stopAutoInit && this.init();
   }
 
-  static registerSerializer(contentType: string, serializer: { serialize: (value: unknown) => Buffer; deserialize: (value: Buffer, encoding?: BufferEncoding) => unknown }) {
+  static registerSerializer(contentType: string, serializer: RabbitMqSerializer) {
     return registerSerializer(contentType, serializer);
+  }
+
+  registerSerializer(contentType: string, serializer: RabbitMqSerializer) {
+    this.serializers[contentType] = serializer;
+    return serializer;
+  }
+
+  private getSerializer(contentType?: string) {
+    const resolvedContentType = contentType
+      || this.clientInitConfig.defaultContentType;
+
+    if (!resolvedContentType) {
+      return null;
+    }
+
+    return this.serializers[resolvedContentType]
+      || getSerializer(resolvedContentType)
+      || SERIALIZERS[resolvedContentType]
+      || null;
   }
 
   getMetrics() {
@@ -235,22 +267,22 @@ export class RabbitMQClient {
           const promises: Promise<Replies.AssertQueue>[] = [];
 
           for (const queueConfig of queues) {
-            const queueListenersMap = new Map<string, ReplaySubject<RmqEventMessage>>();
-            const queueCallbacksMap = new Map<string, RmqMessageTypeHandler>();
+            const queueListenersMap = new Map<string, ReplaySubject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>>();
+            const queueCallbacksMap = new Map<string, RmqMessageTypeHandler<unknown>>();
             this.queueToEventHandleMapping.set(queueConfig.name, queueListenersMap);
             this.queueToEventCallbackMapping.set(queueConfig.name, queueCallbacksMap);
             
             // by default, create an observable stream on the queue for unidentified/null routing keys
             queueListenersMap.set(this.DEFAULT_LISTENER_TYPE, new ReplaySubject());
 
-            const useHandleMessageTypes: RmqHandleMessageTypeConfigs = queueConfig.handleMessageTypes || [];
+            const useHandleMessageTypes: RmqHandleMessageTypeConfigs<MessageName, TPayloadMap> = queueConfig.handleMessageTypes || [];
             for (const messageType of useHandleMessageTypes) {
               if (typeof messageType === 'string') {
                 queueListenersMap.set(messageType as string, new ReplaySubject());
               }
               else {
-                const config: RmqHandleMessageTypeConfig = messageType;
-                queueCallbacksMap.set(config.messageName, config.callbackHandler);
+                const config: RmqHandleMessageTypeConfig<MessageName, TPayloadMap[MessageName]> = messageType;
+                queueCallbacksMap.set(config.messageName, config.callbackHandler as RmqMessageTypeHandler<unknown>);
               }
             }
 
@@ -352,16 +384,25 @@ export class RabbitMQClient {
         // see if a listener was created for the routing key
         const messageType = message.properties.type;
         const useContentType = message.properties.contentType;
-        const serializer = getSerializer(useContentType || 'application/octet-stream');
+        const serializer = this.getSerializer(useContentType);
         const useData = serializer ? serializer.deserialize(message.content) : message.content;
         if (this.metricsEnabled) {
           this.metrics.messagesReceived += 1;
         }
-        const messageObj: RmqEventMessage = {
+        const messageObj: RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey> = {
           data: useData,
           message,
           ack: () => {
             this.ack(message);
+          },
+          nack: (requeue = true) => {
+            this.nack(message, requeue);
+          },
+          retry: (options = {}) => {
+            this.retryMessage(message, options);
+          },
+          handlerError: (error, options = {}) => {
+            return this.handleMessageError(message, error, options);
           },
           sendMessage: this.sendMessage.bind(this),
           sendRequest: this.sendRequest.bind(this),
@@ -434,7 +475,7 @@ export class RabbitMQClient {
     this.log('info', `Registering messages/events listener for queue: ${queue}`);
     const startQueueListener = this.getQueueListener(queue, options);
 
-    this.messagesStreamsByQueue[queue] = new Subject<RmqEventMessage>();
+    this.messagesStreamsByQueue[queue] = new Subject<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>();
     this.queueListeners[queue] = this.onReady.pipe(
       tap((readyState) => {
         startQueueListener()
@@ -447,18 +488,18 @@ export class RabbitMQClient {
     });
   }
 
-  onQueue(queue: string, options?: Options.Consume) {
+  onQueue(queue: QueueName, options?: Options.Consume) {
     // listen for messages on the queue
     this.listenToQueue(queue, options);
-    
-    const handle = (messageType: string) => {
+
+    const handle = <TMessageName extends MessageName>(messageType: TMessageName) => {
       return this.onReady.pipe(
         mergeMap((ready: boolean, index: number) => {
           const queueListeners = this.queueToEventHandleMapping.get(queue);
           if (!queueListeners?.has(messageType)) {
             throw new Error(`The provided routing key was not provided during initialization. Please add routing key "${messageType}" in the list of routing keys for the queue config in the constructor.`);
           }
-          return queueListeners.get(messageType)!.asObservable();
+          return queueListeners.get(messageType)!.asObservable() as Observable<RmqEventMessage<TPayloadMap[TMessageName]>>;
         })
       );
     };
@@ -472,20 +513,17 @@ export class RabbitMQClient {
       );
     };
 
-    /**
-      Providing callback function approach
-    */
-    const onEvent = (messageType: string, handler: RmqEventHandler) => {
+    const onEvent = <TMessageName extends MessageName>(messageType: TMessageName, handler: RmqEventHandler<TPayloadMap[TMessageName], QueueName, ExchangeName, RoutingKey>) => {
       return this.onReady
         .pipe(mergeMap(() => this.messagesStreamsByQueue[queue]))
-        .pipe(filter((event: RmqEventMessage) => event.message.properties.type === messageType))
-        .subscribe({ next: handler });
+        .pipe(filter((event: RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>) => event.message.properties.type === messageType))
+        .subscribe({ next: (event) => handler(event as RmqEventMessage<TPayloadMap[TMessageName], QueueName, ExchangeName, RoutingKey>) });
     };
 
-    const handleAll = (handler: RmqEventHandler) => {
+    const handleAll = (handler: RmqEventHandler<TPayloadMap[keyof TPayloadMap], QueueName, ExchangeName, RoutingKey>) => {
       return this.onReady
         .pipe(mergeMap(() => this.messagesStreamsByQueue[queue]))
-        .subscribe({ next: handler });
+        .subscribe({ next: (event) => handler(event as RmqEventMessage<TPayloadMap[keyof TPayloadMap], QueueName, ExchangeName, RoutingKey>) });
     };
 
     return {
@@ -496,7 +534,7 @@ export class RabbitMQClient {
     };
   }
 
-  forQueue(queue: string, options?: Options.Consume) {
+  forQueue(queue: QueueName, options?: Options.Consume) {
     this.listenToQueue(queue, options);
     return this.messagesStreamsByQueue[queue].asObservable();
   }
@@ -520,7 +558,7 @@ export class RabbitMQClient {
     this.log('debug', `Nacknowledged rmq message with requeue=${requeue}.`);
   }
 
-  retryMessage(message: ConsumeMessage, options: { delayMs?: number, requeue?: boolean, queue?: string } = {}) {
+  retryMessage(message: ConsumeMessage, options: RmqRetryMessageOptions<QueueName> = {}) {
     const { delayMs = 0, requeue = true, queue = '' } = options;
     const targetQueue = queue || message.fields.routingKey || '';
     if (delayMs > 0) {
@@ -658,11 +696,11 @@ export class RabbitMQClient {
     this.log('info', 'RabbitMQ client closed.');
   }
 
-  sendMessage(options: RmqSendMessageParams) {
+  sendMessage<T = unknown>(options: RmqSendMessageParams<T, QueueName>) {
     const send = () => {
       const { data, publishOptions, queue } = options;
-      const useContentType = publishOptions.contentType || ContentTypes.TEXT;
-      const serializer = getSerializer(useContentType) || SERIALIZERS[useContentType];
+      const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || ContentTypes.TEXT;
+      const serializer = this.getSerializer(useContentType);
       const useData: Buffer = serializer
         ? (serializer.serialize(data) as Buffer)
         : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
@@ -686,8 +724,8 @@ export class RabbitMQClient {
   }
 
   private getRpcMethods(temporaryRpcQueue: string, options: {
-    queue: string,
-    data: any,
+    queue: QueueName,
+    data: unknown,
     publishOptions: Options.Publish,
   }, autoAckOnReceiveReply: boolean, requestTimeoutMs?: number) {
     const start_time = Date.now();
@@ -697,8 +735,8 @@ export class RabbitMQClient {
 
     const send = () => {
       const { data, publishOptions, queue } = options;
-      const useContentType = publishOptions.contentType || ContentTypes.TEXT;
-      const serializer = getSerializer(useContentType) || SERIALIZERS[useContentType];
+      const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || ContentTypes.TEXT;
+      const serializer = this.getSerializer(useContentType);
       const useData: Buffer = serializer
         ? (serializer.serialize(data) as Buffer)
         : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
@@ -709,7 +747,7 @@ export class RabbitMQClient {
     };
   
     const watch = <T> () => {
-      return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
+      return new Promise<RmqEventMessage<T, QueueName, ExchangeName, RoutingKey>>(async (resolve, reject) => {
         let settled = false;
         let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -750,16 +788,25 @@ export class RabbitMQClient {
             settled = true;
             void cleanup();
             const useContentType = message.properties.contentType;
-            const serializer = getSerializer(useContentType || 'application/octet-stream') || SERIALIZERS[useContentType || 'application/octet-stream'];
+            const serializer = this.getSerializer(useContentType);
             const useData = serializer ? serializer.deserialize(message.content) : message.content;
             if (this.metricsEnabled) {
               this.metrics.rpcResponses += 1;
             }
-            const messageObj: RmqEventMessage<T> = {
+            const messageObj: RmqEventMessage<T, QueueName, ExchangeName, RoutingKey> = {
               data: useData as T,
               message,
               ack: () => {
                 this.ack(message);
+              },
+              nack: (requeue = true) => {
+                this.nack(message, requeue);
+              },
+              retry: (options = {}) => {
+                this.retryMessage(message, options);
+              },
+              handlerError: (error, options = {}) => {
+                return this.handleMessageError(message, error, options);
               },
               sendMessage: this.sendMessage.bind(this),
               sendRequest: this.sendRequest.bind(this),
@@ -783,18 +830,14 @@ export class RabbitMQClient {
     return { watch, send };
   }
 
-  sendRequest <T = any> (
-    options: {
-      queue: string,
-      data: any,
-      publishOptions: Options.Publish,
-    },
+  sendRequest<T = unknown>(
+    options: RmqSendRequestParams<unknown, QueueName>,
     autoAckOnReceiveReply: boolean = true,
     timeoutMs?: number
   ) {
     this.log('debug', 'sendRequest:', options);
 
-    return new Promise<RmqEventMessage<T>>(async (resolve, reject) => {
+    return new Promise<RmqEventMessage<T, QueueName, ExchangeName, RoutingKey>>(async (resolve, reject) => {
       
       const temporaryRpcQueue = uuidv1();
 
@@ -809,7 +852,7 @@ export class RabbitMQClient {
         this.log('debug', 'waiting until ready to send request');
         firstValueFrom(this.onReady).then((readyState) => {
           this.log('debug', 'now ready and watching temp queue', { readyState });
-          rpc.watch<T>().then((message: RmqEventMessage<T>) => {
+          rpc.watch<T>().then((message: RmqEventMessage<T, QueueName, ExchangeName, RoutingKey>) => {
             resolve(message);
           }).catch(reject); // first listen on the reply queue
           this.log('debug', 'sending request');
@@ -818,7 +861,7 @@ export class RabbitMQClient {
       }
       else {
         this.log('debug', 'now ready and watching temp queue');
-        rpc.watch<T>().then((message: RmqEventMessage<T>) => {
+        rpc.watch<T>().then((message: RmqEventMessage<T, QueueName, ExchangeName, RoutingKey>) => {
           resolve(message);
         }).catch(reject); // first listen on the reply queue
         this.log('debug', 'sending request');
@@ -827,11 +870,11 @@ export class RabbitMQClient {
     });
   }
 
-  publishEvent(options: RmqPublishEventParams) {
+  publishEvent<T = unknown>(options: RmqPublishEventParams<T, ExchangeName, RoutingKey>) {
     const publish = () => {
       const { data, routingKey, publishOptions, exchange } = options;
-      const useContentType = publishOptions.contentType || ContentTypes.TEXT;
-      const serializer = getSerializer(useContentType) || SERIALIZERS[useContentType];
+      const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || ContentTypes.TEXT;
+      const serializer = this.getSerializer(useContentType);
       const useData: Buffer = serializer
         ? (serializer.serialize(data) as Buffer)
         : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');

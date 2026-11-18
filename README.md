@@ -250,6 +250,43 @@ client.deadLetter(event.message, 'processing failed', 'emails.dlq');
 
 These helpers are intentionally opt-in and explicit; they avoid forcing a policy onto all consumers.
 
+You can also call these operations directly from the event object, without retaining or passing the client instance:
+
+```ts
+client.onQueue('emails').handle('SEND_EMAIL').subscribe({
+  next: (event) => {
+    try {
+      // process message
+      event.ack();
+    } catch (error) {
+      event.nack(false);
+
+      event.retry({
+        delayMs: 2000,
+        requeue: false,
+        queue: 'emails.retry'
+      });
+
+      const result = event.handlerError(error, {
+        reason: 'email processing failed',
+        deadLetterQueue: 'emails.dlq',
+        requeue: false
+      });
+
+      console.log(result.action);
+    }
+  }
+});
+```
+
+The event convenience methods are:
+
+- `event.nack(requeue?)`: reject the current message
+- `event.retry(options?)`: retry through a queue or delay
+- `event.handlerError(error, options?)`: apply centralized retry, DLQ, or nack handling
+
+Each method wraps the corresponding client method and captures the event’s `ConsumeMessage`, so consumer callbacks do not need to reference the client object.
+
 ### Dead-letter queue setup and centralized error handling
 
 For production workloads, it is often easier to define the DLQ topology once and then route failures through a single helper.
@@ -300,6 +337,30 @@ This makes it easier to keep error handling consistent across queues without bur
 ## Serialization
 
 The library includes a built-in serializer registry in `SERIALIZERS` and supports custom registration.
+
+Serializer configuration can also be scoped to one client instance:
+
+```ts
+const client = new RabbitMQClient({
+  connection_url: process.env.RABBITMQ_URL!,
+  defaultContentType: 'application/custom+json',
+  serializers: {
+    'application/custom+json': {
+      serialize: (value) => Buffer.from(JSON.stringify(value)),
+      deserialize: (buffer) => JSON.parse(buffer.toString('utf8'))
+    }
+  },
+  queues: [],
+  exchanges: [],
+  bindings: [],
+  retryAttempts: 3,
+  retryDelay: 1000
+});
+```
+
+Instance serializers take precedence over the global registry. Incoming messages are deserialized automatically from `message.properties.contentType`; if that property is missing, `defaultContentType` is used.
+
+Global custom registration remains available for backwards compatibility:
 
 ```ts
 import { registerSerializer } from 'rxjs-rabbitmq';
@@ -495,3 +556,73 @@ ISC
 ## Support
 
 This package assumes you already understand RabbitMQ semantics and the application-level contract around your queues, exchanges, and routing keys.
+
+## Compile-time resource and payload typing
+
+The client can be parameterized with literal resource names and a payload map. This rejects unknown queues, exchanges, routing keys, and message types at compile time and infers payload types in handlers.
+
+```ts
+import { RabbitMQClient } from 'rxjs-rabbitmq';
+
+type EmailPayloads = {
+  SEND_EMAIL: { to: string; subject: string };
+  EMAIL_SENT: { ok: boolean };
+};
+
+const client = new RabbitMQClient<
+  'emails' | 'jobs',
+  'app.events',
+  '#' | 'email.sent',
+  'SEND_EMAIL' | 'EMAIL_SENT',
+  EmailPayloads
+>({
+  connection_url: process.env.RABBITMQ_URL!,
+  retryAttempts: 3,
+  retryDelay: 1000,
+  queues: [{
+    name: 'emails',
+    handleMessageTypes: [{
+      messageName: 'SEND_EMAIL',
+      callbackHandler: (event) => {
+        const recipient: string = event.data.to;
+        void recipient;
+      }
+    }]
+  }],
+  exchanges: [{ name: 'app.events', type: 'fanout' }],
+  bindings: [{ queue: 'emails', exchange: 'app.events', routingKey: '#' }]
+});
+
+client.onQueue('emails').handle('SEND_EMAIL').subscribe((event) => {
+  const recipient: string = event.data.to;
+  void recipient;
+});
+
+client.onQueue('emails').onEvent('EMAIL_SENT', (event) => {
+  const success: boolean = event.data.ok;
+  void success;
+});
+
+client.publishEvent({
+  exchange: 'app.events',
+  routingKey: 'email.sent',
+  data: { ok: true },
+  publishOptions: { contentType: 'application/json' }
+});
+
+// Compile-time errors:
+// client.onQueue('unknown');
+// client.onQueue('emails').handle('UNKNOWN_EVENT');
+// client.publishEvent({ exchange: 'unknown.exchange', data: {}, publishOptions: {} });
+// client.publishEvent({ exchange: 'app.events', routingKey: 'unknown.route', data: {}, publishOptions: {} });
+```
+
+The five generic parameters are:
+
+1. `QueueName` — known queue names
+2. `ExchangeName` — known exchange names
+3. `RoutingKey` — known routing keys
+4. `MessageName` — known `message.properties.type` values
+5. `TPayloadMap` — payload types keyed by message name
+
+All generics default to `string` or `unknown`, so existing non-generic usage remains compatible.

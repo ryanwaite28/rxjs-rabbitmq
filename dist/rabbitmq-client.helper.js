@@ -41,6 +41,7 @@ class RabbitMQClient {
         this.isReadyStream = new rxjs_1.BehaviorSubject(this.isReady);
         this.connectionErrorStream = new rxjs_1.Subject();
         this.connectionCloseStream = new rxjs_1.Subject();
+        this.serializers = {};
         this.reconnectAttempts = 0;
         /*
           Handle all messages from all queues on this client
@@ -66,6 +67,7 @@ class RabbitMQClient {
         this.queueToEventHandleMapping = new Map();
         this.queueToEventCallbackMapping = new Map();
         this.clientInitConfig = clientInitConfig;
+        this.serializers = Object.assign({}, (clientInitConfig.serializers || {}));
         this.metricsEnabled = !!clientInitConfig.metrics;
         this.logger = {
             debug: (_b = (_a = clientInitConfig.logger) === null || _a === void 0 ? void 0 : _a.debug) !== null && _b !== void 0 ? _b : (() => undefined),
@@ -77,6 +79,21 @@ class RabbitMQClient {
     }
     static registerSerializer(contentType, serializer) {
         return (0, utils_1.registerSerializer)(contentType, serializer);
+    }
+    registerSerializer(contentType, serializer) {
+        this.serializers[contentType] = serializer;
+        return serializer;
+    }
+    getSerializer(contentType) {
+        const resolvedContentType = contentType
+            || this.clientInitConfig.defaultContentType;
+        if (!resolvedContentType) {
+            return null;
+        }
+        return this.serializers[resolvedContentType]
+            || (0, utils_1.getSerializer)(resolvedContentType)
+            || utils_1.SERIALIZERS[resolvedContentType]
+            || null;
     }
     getMetrics() {
         return Object.assign({}, this.metrics);
@@ -245,7 +262,7 @@ class RabbitMQClient {
                 // see if a listener was created for the routing key
                 const messageType = message.properties.type;
                 const useContentType = message.properties.contentType;
-                const serializer = (0, utils_1.getSerializer)(useContentType || 'application/octet-stream');
+                const serializer = this.getSerializer(useContentType);
                 const useData = serializer ? serializer.deserialize(message.content) : message.content;
                 if (this.metricsEnabled) {
                     this.metrics.messagesReceived += 1;
@@ -255,6 +272,15 @@ class RabbitMQClient {
                     message,
                     ack: () => {
                         this.ack(message);
+                    },
+                    nack: (requeue = true) => {
+                        this.nack(message, requeue);
+                    },
+                    retry: (options = {}) => {
+                        this.retryMessage(message, options);
+                    },
+                    handlerError: (error, options = {}) => {
+                        return this.handleMessageError(message, error, options);
                     },
                     sendMessage: this.sendMessage.bind(this),
                     sendRequest: this.sendRequest.bind(this),
@@ -346,19 +372,16 @@ class RabbitMQClient {
                 return ((_a = queueListeners === null || queueListeners === void 0 ? void 0 : queueListeners.get(this.DEFAULT_LISTENER_TYPE)) !== null && _a !== void 0 ? _a : new rxjs_1.ReplaySubject()).asObservable();
             }));
         };
-        /**
-          Providing callback function approach
-        */
         const onEvent = (messageType, handler) => {
             return this.onReady
                 .pipe((0, rxjs_1.mergeMap)(() => this.messagesStreamsByQueue[queue]))
                 .pipe((0, rxjs_1.filter)((event) => event.message.properties.type === messageType))
-                .subscribe({ next: handler });
+                .subscribe({ next: (event) => handler(event) });
         };
         const handleAll = (handler) => {
             return this.onReady
                 .pipe((0, rxjs_1.mergeMap)(() => this.messagesStreamsByQueue[queue]))
-                .subscribe({ next: handler });
+                .subscribe({ next: (event) => handler(event) });
         };
         return {
             handle,
@@ -476,8 +499,8 @@ class RabbitMQClient {
     sendMessage(options) {
         const send = () => {
             const { data, publishOptions, queue } = options;
-            const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || enums_1.ContentTypes.TEXT;
+            const serializer = this.getSerializer(useContentType);
             const useData = serializer
                 ? serializer.serialize(data)
                 : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
@@ -506,8 +529,8 @@ class RabbitMQClient {
         const timeoutMs = (_a = requestTimeoutMs !== null && requestTimeoutMs !== void 0 ? requestTimeoutMs : this.clientInitConfig.rpcRequestTimeoutMs) !== null && _a !== void 0 ? _a : 30000;
         const send = () => {
             const { data, publishOptions, queue } = options;
-            const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || enums_1.ContentTypes.TEXT;
+            const serializer = this.getSerializer(useContentType);
             const useData = serializer
                 ? serializer.serialize(data)
                 : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');
@@ -552,7 +575,7 @@ class RabbitMQClient {
                         settled = true;
                         void cleanup();
                         const useContentType = message.properties.contentType;
-                        const serializer = (0, utils_1.getSerializer)(useContentType || 'application/octet-stream') || utils_1.SERIALIZERS[useContentType || 'application/octet-stream'];
+                        const serializer = this.getSerializer(useContentType);
                         const useData = serializer ? serializer.deserialize(message.content) : message.content;
                         if (this.metricsEnabled) {
                             this.metrics.rpcResponses += 1;
@@ -562,6 +585,15 @@ class RabbitMQClient {
                             message,
                             ack: () => {
                                 this.ack(message);
+                            },
+                            nack: (requeue = true) => {
+                                this.nack(message, requeue);
+                            },
+                            retry: (options = {}) => {
+                                this.retryMessage(message, options);
+                            },
+                            handlerError: (error, options = {}) => {
+                                return this.handleMessageError(message, error, options);
                             },
                             sendMessage: this.sendMessage.bind(this),
                             sendRequest: this.sendRequest.bind(this),
@@ -615,8 +647,8 @@ class RabbitMQClient {
     publishEvent(options) {
         const publish = () => {
             const { data, routingKey, publishOptions, exchange } = options;
-            const useContentType = publishOptions.contentType || enums_1.ContentTypes.TEXT;
-            const serializer = (0, utils_1.getSerializer)(useContentType) || utils_1.SERIALIZERS[useContentType];
+            const useContentType = publishOptions.contentType || this.clientInitConfig.defaultContentType || enums_1.ContentTypes.TEXT;
+            const serializer = this.getSerializer(useContentType);
             const useData = serializer
                 ? serializer.serialize(data)
                 : Buffer.from(typeof data === 'string' ? data : JSON.stringify(data), 'utf8');

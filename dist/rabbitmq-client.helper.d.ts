@@ -1,12 +1,11 @@
-/// <reference types="node" />
 import { Connection, Channel, Options, ConsumeMessage } from "amqplib";
 import { Observable, Subscription } from "rxjs";
-import { DeadLetterQueueConfig, HandleMessageErrorOptions, RabbitMqInitConfig, RmqEventHandler, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams } from "./types";
+import { DeadLetterQueueConfig, HandleMessageErrorOptions, RabbitMqInitConfig, RmqEventHandler, RmqEventMessage, RmqPublishEventParams, RmqSendMessageParams, RmqSendRequestParams, RmqPayloadMap, RmqRetryMessageOptions, RabbitMqSerializer } from "./types";
 export type RmgOnEventHandler = (event: RmqEventMessage, rmqClient?: RabbitMQClient) => void;
 /**
   Rabbit MQ - RxJS Powered
 */
-export declare class RabbitMQClient {
+export declare class RabbitMQClient<QueueName extends string = string, ExchangeName extends string = string, RoutingKey extends string = string, MessageName extends string = string, TPayloadMap extends RmqPayloadMap = RmqPayloadMap> {
     private clientInitConfig;
     private logger;
     private connection;
@@ -16,6 +15,7 @@ export declare class RabbitMQClient {
     private connectionErrorStream;
     private connectionCloseStream;
     private reconnectTimeout;
+    private serializers;
     private reconnectAttempts;
     private messagesStream;
     private messagesStreamsByQueue;
@@ -33,12 +33,11 @@ export declare class RabbitMQClient {
     get onReady(): Observable<boolean>;
     get onConnectionError(): Observable<any>;
     get onConnectionClose(): Observable<any>;
-    get onMessage(): Observable<RmqEventMessage>;
-    constructor(clientInitConfig: RabbitMqInitConfig);
-    static registerSerializer(contentType: string, serializer: {
-        serialize: (value: unknown) => Buffer;
-        deserialize: (value: Buffer, encoding?: BufferEncoding) => unknown;
-    }): import("./types").RabbitMqSerializer;
+    get onMessage(): Observable<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>;
+    constructor(clientInitConfig: RabbitMqInitConfig<QueueName, ExchangeName, RoutingKey, MessageName, TPayloadMap>);
+    static registerSerializer(contentType: string, serializer: RabbitMqSerializer): RabbitMqSerializer;
+    registerSerializer(contentType: string, serializer: RabbitMqSerializer): RabbitMqSerializer;
+    private getSerializer;
     getMetrics(): {
         messagesReceived: number;
         messagesPublished: number;
@@ -56,20 +55,16 @@ export declare class RabbitMQClient {
     getChannel(): Channel;
     private getQueueListener;
     private listenToQueue;
-    onQueue(queue: string, options?: Options.Consume): {
-        handle: (messageType: string) => Observable<RmqEventMessage>;
-        handleAll: (handler: RmqEventHandler) => Subscription;
-        handleDefault: () => Observable<RmqEventMessage>;
-        onEvent: (messageType: string, handler: RmqEventHandler) => Subscription;
+    onQueue(queue: QueueName, options?: Options.Consume): {
+        handle: <TMessageName extends MessageName>(messageType: TMessageName) => Observable<RmqEventMessage<TPayloadMap[TMessageName]>>;
+        handleAll: (handler: RmqEventHandler<TPayloadMap[keyof TPayloadMap], QueueName, ExchangeName, RoutingKey>) => Subscription;
+        handleDefault: () => Observable<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>;
+        onEvent: <TMessageName_1 extends MessageName>(messageType: TMessageName_1, handler: RmqEventHandler<TPayloadMap[TMessageName_1], QueueName, ExchangeName, RoutingKey>) => Subscription;
     };
-    forQueue(queue: string, options?: Options.Consume): Observable<RmqEventMessage>;
+    forQueue(queue: QueueName, options?: Options.Consume): Observable<RmqEventMessage<unknown, QueueName, ExchangeName, RoutingKey>>;
     ack(message: ConsumeMessage): void;
     nack(message: ConsumeMessage, requeue?: boolean): void;
-    retryMessage(message: ConsumeMessage, options?: {
-        delayMs?: number;
-        requeue?: boolean;
-        queue?: string;
-    }): void;
+    retryMessage(message: ConsumeMessage, options?: RmqRetryMessageOptions<QueueName>): void;
     deadLetter(message: ConsumeMessage, reason: string, queue?: string): void;
     setupDeadLetterQueue(config: DeadLetterQueueConfig): Promise<{
         sourceQueue: string;
@@ -94,12 +89,8 @@ export declare class RabbitMQClient {
         retryDelayMs?: undefined;
     };
     close(): Promise<void>;
-    sendMessage(options: RmqSendMessageParams): void;
+    sendMessage<T = unknown>(options: RmqSendMessageParams<T, QueueName>): void;
     private getRpcMethods;
-    sendRequest<T = any>(options: {
-        queue: string;
-        data: any;
-        publishOptions: Options.Publish;
-    }, autoAckOnReceiveReply?: boolean, timeoutMs?: number): Promise<RmqEventMessage<T>>;
-    publishEvent(options: RmqPublishEventParams): void;
+    sendRequest<T = unknown>(options: RmqSendRequestParams<unknown, QueueName>, autoAckOnReceiveReply?: boolean, timeoutMs?: number): Promise<RmqEventMessage<T, QueueName, ExchangeName, RoutingKey>>;
+    publishEvent<T = unknown>(options: RmqPublishEventParams<T, ExchangeName, RoutingKey>): void;
 }
