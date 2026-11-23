@@ -1,12 +1,12 @@
-import { MapType, RabbitMqSerializer, RabbitMqSerializerMap } from "./types";
+import type { MapType, RabbitMqSerializer, RabbitMqSerializerMap } from "./types";
 
 // https://github.com/Foo-Foo-MQ/foo-foo-mq/blob/main/src/index.js
 export const SERIALIZERS: RabbitMqSerializerMap = {
   'application/json': {
-    deserialize: (bytes: any, encoding: any) => {
+    deserialize: (bytes: Buffer, encoding?: BufferEncoding) => {
       return JSON.parse(bytes.toString(encoding || 'utf8'));
     },
-    serialize: (object: any) => {
+    serialize: (object: unknown) => {
       const json = (typeof object === 'string')
         ? object
         : JSON.stringify(object);
@@ -14,10 +14,10 @@ export const SERIALIZERS: RabbitMqSerializerMap = {
     }
   },
   'application/octet-stream': {
-    deserialize: (bytes: any) => {
+    deserialize: (bytes: Buffer) => {
       return bytes;
     },
-    serialize: (bytes: any) => {
+    serialize: (bytes: unknown) => {
       if (Buffer.isBuffer(bytes)) {
         return bytes;
       } else if (Array.isArray(bytes)) {
@@ -28,7 +28,7 @@ export const SERIALIZERS: RabbitMqSerializerMap = {
     }
   },
   'text/plain': {
-    deserialize: (bytes: any, encoding: any) => {
+    deserialize: (bytes: Buffer, encoding?: BufferEncoding) => {
       return bytes.toString(encoding || 'utf8');
     },
     serialize: (value: unknown) => {
@@ -39,26 +39,26 @@ export const SERIALIZERS: RabbitMqSerializerMap = {
 
 export const registerSerializer = (contentType: string, serializer: RabbitMqSerializer) => {
   SERIALIZERS[contentType] = serializer;
-  return SERIALIZERS[contentType];
+  return serializer;
 };
 
-export const getSerializer = (contentType: string) => {
+export const getSerializer = (contentType: string): RabbitMqSerializer | null => {
   return SERIALIZERS[contentType] || null;
 };
 
-export const mapify = <T> (list: T[], key: string | number): MapType<T> => {
+export const mapify = <T extends object>(list: readonly T[], key: keyof T): MapType<T> => {
   return list.reduce((map: MapType<T>, item: T) => {
-    map[ item[key] ] = item;
+    map[String(item[key])] = item;
     return map;
   }, {} as MapType<T>);
 };
 
-export const wait = (time) => {
+export const wait = (time: number): Promise<void> => {
   return new Promise((resolve) => {
     setTimeout(resolve, time);
   });
 };
 
 export function uniqueValue() {
-  return Math.random().toString(33).substring(2) + '-' + Date.now();
+  return `${Math.random().toString(33).substring(2)}-${Date.now()}`;
 }

@@ -1,628 +1,456 @@
 # RxJS RabbitMQ Client
 
-A lightweight RabbitMQ client for Node.js that blends RabbitMQ messaging with RxJS-style event handling.
+A small RabbitMQ client for Node.js that exposes queues as RxJS streams. It is built for
+long-running services: publisher confirms, bounded memory, subscriptions that survive reconnects,
+graceful shutdown, and broker-side retry and dead-lettering. It runs under a least-privilege
+RabbitMQ user.
 
-The library is intentionally small and stable: it focuses on four primary tasks:
+It intentionally stays small and unopinionated. It gives you the hooks and guarantees, and you
+build your envelope schema, retry tiers, idempotency and tracing on top.
 
-- establishing a RabbitMQ connection and channel
-- asserting queues, exchanges, and bindings
-- exposing queue events as RxJS streams
-- supporting basic request/reply messaging and typed publish helpers
-
-It is designed for service-to-service messaging where you want a simple and familiar RxJS interface without introducing a larger messaging framework.
-
-## Why this library exists
-
-This package is best when you want:
-
-- RabbitMQ message handling with RxJS streams
-- per-queue event subscriptions
-- message type routing from `message.properties.type`
-- simple request/reply patterns
-- direct control over RabbitMQ resources without a heavy abstraction layer
-
-It is not a full orchestration engine or a replacement for a full enterprise messaging platform. The library tries to stay small, explicit, and operationally predictable.
+> Upgrading from 2.x? See [CHANGELOG.md](./CHANGELOG.md). Publishing now returns promises,
+> streams no longer replay, and `close()` drains and never reconnects.
 
 ## Installation
 
 ```bash
-npm install rxjs-rabbitmq amqplib rxjs uuid
+npm install rxjs-rabbitmq amqplib rxjs
 ```
 
-## Core concepts
-
-### Queue configuration
-
-Each configured queue can optionally declare known message types:
-
-```ts
-const queues = [
-  {
-    name: 'emails',
-    handleMessageTypes: ['SEND_EMAIL', 'EMAIL_SENT'],
-    options: { durable: true }
-  }
-];
-```
-
-When a message arrives:
-
-- the global `onMessage` stream receives it
-- the queue-specific stream receives it
-- if the message has a known `type`, it is routed to the matching registered stream or callback
-- if no type is found, it is routed to the default queue handler when enabled
-
-### Exchange configuration
-
-```ts
-const exchanges = [
-  {
-    name: 'user.events',
-    type: 'fanout',
-    options: { durable: true }
-  }
-];
-```
-
-### Binding configuration
-
-```ts
-const bindings = [
-  {
-    queue: 'emails',
-    exchange: 'user.events',
-    routingKey: '#'
-  }
-];
-```
+`amqplib` (`^2.4.0`) and `rxjs` (`^7.8.2`) are peer dependencies, so your app supplies exactly one
+copy of each. Node.js `>= 20`. The package ships CommonJS and ESM (`import` and `require` both
+work, and share one module instance) with type declarations.
 
 ## Quick start
 
 ```ts
-import { RabbitMQClient, RmqEventMessage, ContentTypes } from 'rxjs-rabbitmq';
+import { RabbitMQClient, ContentTypes } from 'rxjs-rabbitmq';
 
 const client = new RabbitMQClient({
   connection_url: process.env.RABBITMQ_URL!,
-  retryAttempts: 3,
-  retryDelay: 2000,
-  prefetch: 10,
-  autoAckUnhandledMessageTypes: true,
-  queues: [
-    {
-      name: 'emails',
-      handleMessageTypes: ['SEND_EMAIL'],
-      options: { durable: true }
-    }
-  ],
-  exchanges: [
-    {
-      name: 'app.events',
-      type: 'fanout',
-      options: { durable: true }
-    }
-  ],
-  bindings: []
+  topology: 'verify',     // topology is declared out of band; only check it exists
+  confirm: true,          // default: publishes resolve on broker ack
+  prefetch: 16,
+  queues: [{ name: 'emails' }],
+  exchanges: [{ name: 'app.events', type: 'topic' }],
 });
 
-client.onMessage.subscribe((event: RmqEventMessage) => {
-  console.log('Received message', event.data);
+client.onQueue('emails').handle('SEND_EMAIL').subscribe(async (event) => {
+  await sendEmail(event.data);
+  event.ack();
 });
 
-client.onQueue('emails').handle('SEND_EMAIL').subscribe({
-  next: (event: RmqEventMessage) => {
-    console.log('Email event payload:', event.data);
-    event.ack();
-  }
+await client.publishEvent({
+  exchange: 'app.events',
+  routingKey: 'email.requested',
+  data: { to: 'user@example.com' },
+  publishOptions: { type: 'SEND_EMAIL', contentType: ContentTypes.JSON, persistent: true, mandatory: true },
 });
 ```
+
+## Core concepts
+
+### Topology modes
+
+`topology` controls what the client does with `queues`, `exchanges` and `bindings` on every
+(re)connect:
+
+| Mode | Calls | Permission needed |
+|---|---|---|
+| `'declare'` (default) | `assertQueue`, `assertExchange`, `bindQueue` | `configure` |
+| `'verify'` | passive `checkQueue`, `checkExchange`; bindings are skipped | none |
+| `'none'` | nothing | none |
+
+In `'verify'` mode, a missing queue or exchange fails `init()` with a `TopologyVerificationError`
+that names it (`error.resourceType`, `error.resource`). It is not retried.
+
+`onQueue(q)` works for **any** queue in your `QueueName` type, whether or not it is listed in
+`queues`.
+
+#### Least-privilege setup
+
+The runtime user only needs `read` on the queues it consumes and `write` on the exchanges it
+publishes to:
+
+```bash
+rabbitmqctl set_permissions -p / svc-orders '^$' '^orders\.events$' '^orders\.q$'
+#                                   configure   write               read
+```
+
+```ts
+new RabbitMQClient({
+  connection_url: 'amqp://svc-orders:***@rabbitmq',
+  topology: 'verify',
+  queues: [{ name: 'orders.q' }],
+  exchanges: [{ name: 'orders.events', type: 'topic' }],
+});
+```
+
+Notes:
+- `sendMessage()` publishes through the default exchange, which requires `write` on `amq.default`.
+- `sendRequest()` declares an exclusive reply queue, which requires `configure`.
+- RabbitMQ 4.x rejects transient (`durable: false`), non-exclusive queues.
+
+### Message types
+
+Messages are routed by `message.properties.type`:
+
+- `onQueue(q).handle(type)` gets deliveries of that type
+- `onQueue(q).handleDefault()` gets deliveries without a type
+- `onQueue(q).handleAll(handler)` and `forQueue(q)` get every delivery on the queue
+- `handleMessageTypes` callback entries in the queue config act as handlers registered up front
+
+A delivery that reaches none of these is handled by `unhandledMessages`:
+
+| Policy | Behavior |
+|---|---|
+| `'nack-requeue'` (default) | `nack(requeue = true)`; nothing is lost |
+| `'nack'` | `nack(requeue = false)`, which dead-letters via the queue's DLX if it has one |
+| `'ack'` | acknowledge and drop |
+| `'default'` | push to `handleDefault()`; falls back to `'nack-requeue'` if nobody listens there |
+
+### Lazy consumption and bounded streams
+
+- A queue is consumed (`basic.consume`) only while something subscribes to it. Unsubscribing the
+  last subscriber cancels the consumer, so deliveries are never pushed into a stream nobody
+  listens to.
+- Streams are plain `Subject`s. A late subscriber gets only new deliveries, never history.
+- Streams are created once and **survive reconnects**. After a reconnect the client re-issues
+  `basic.consume` for every queue that still has subscribers, and the same observers keep
+  receiving.
+- `client.onMessage` taps every delivery from every consumed queue. It does not start consumers.
+
+Handle errors inside RxJS `subscribe` callbacks yourself; RxJS rethrows them asynchronously. The
+`handleAll(handler)` and `onEvent(type, handler)` helpers, and config `callbackHandler`s, catch
+sync and async errors for you. They report the error on `errors$` and nack-requeue the message if
+it is still unsettled.
 
 ## Event handling patterns
 
-### 1. Listen to every message on a queue
-
 ```ts
-const queue$ = client.forQueue('emails');
+// every delivery on a queue
+client.forQueue('emails').subscribe((event) => { /* ... */ event.ack(); });
 
-queue$.subscribe({
-  next: (event) => {
-    console.log('event payload', event.data);
-  }
-});
-```
+// one message type (RxJS)
+client.onQueue('emails').handle('SEND_EMAIL').subscribe((event) => { /* ... */ event.ack(); });
 
-### 2. Handle a specific message type
+// one message type (callback; returned promises are tracked for graceful shutdown)
+client.onQueue('emails').onEvent('SEND_EMAIL', async (event) => { /* ... */ event.ack(); });
 
-```ts
-const emailsQueue = client.onQueue('emails');
-
-emailsQueue.handle('SEND_EMAIL').subscribe({
-  next: (event) => {
-    console.log(event.data);
-    event.ack();
-  }
-});
-```
-
-### 3. Use a callback-based event handler
-
-```ts
-const emailsQueue = client.onQueue('emails');
-
-emailsQueue.onEvent('SEND_EMAIL', (event) => {
-  console.log(event.data);
+// every delivery (callback)
+client.onQueue('emails').handleAll(async (event) => {
+  console.log(event.queue, event.message.properties.type, event.data);
   event.ack();
 });
 ```
 
-### 4. Listen to all messages on a queue with a custom handler
+Each delivery event carries:
+
+- `data`: the deserialized body
+- `message`: the amqplib `ConsumeMessage`
+- `queue`: the queue it was consumed from (use this in logs, not `message.fields.routingKey`)
+- `consumerTag`
+- `settled`
+- `ack()` and `nack(requeue = true)`, each applied at most once. Calling either on a delivery
+  whose channel has since closed is a no-op, because the broker redelivers it.
+- `republish(options)`, covered under [Broker-side retry and dead-lettering](#broker-side-retry-and-dead-lettering-confirm-then-ack)
+- `publishEvent`, `sendMessage` and `sendRequest`
+
+## Publishing
+
+`publishEvent()` and `sendMessage()` return `Promise<void>`.
 
 ```ts
-client.onQueue('emails').handleAll((event) => {
-  console.log(event.message.properties.type, event.data);
-});
+import { PublishNackedError, PublishReturnedError, PublishChannelClosedError } from 'rxjs-rabbitmq';
+
+try {
+  await client.publishEvent({
+    exchange: 'app.events',
+    routingKey: 'user.created',
+    data: { id: '123' },
+    publishOptions: { type: 'USER_CREATED', contentType: 'application/json', persistent: true, mandatory: true },
+  });
+  // the broker has the message
+} catch (error) {
+  if (error instanceof PublishReturnedError) { /* unroutable: error.replyCode, error.replyText */ }
+  else if (error instanceof PublishNackedError) { /* broker refused it, e.g. a full queue with reject-publish */ }
+  else if (error instanceof PublishChannelClosedError) { /* e.g. 404 missing exchange; error.cause has the broker error */ }
+  else { /* ClientNotReadyError / ClientClosedError */ }
+}
 ```
 
-## Publishing messages
+- With `confirm: true` (default), publishing uses a confirm channel. The promise resolves only
+  after the broker acks the message, which makes it safe for a transactional outbox.
+- With `mandatory: true`, an unroutable message rejects with `PublishReturnedError` instead of
+  being silently dropped. When you don't set a `messageId`, one is generated for correlation.
+- **Backpressure.** When amqplib's write buffer is full, publishes wait for `drain`. Tune this with
+  `publishChannelOptions: { highWaterMark }`, which counts frames.
+- **Before ready.** While the client isn't ready, publishes wait up to `readyTimeoutMs` (default
+  10 s), then reject with `ClientNotReadyError`. Nothing is buffered without bound.
+- **Separate channels.** Publishing uses its own channel, so a failed publish doesn't interrupt
+  consumers. The publish channel is recreated automatically.
+- **Unconfirmed mode.** With `confirm: false`, publishes resolve once the message is written to the
+  socket buffer. Returns are then reported on `errors$` as `message-returned`.
 
-### Publish to a queue
+Always handle the returned promise: an unhandled rejection terminates Node.js.
+
+## Broker-side retry and dead-lettering (confirm-then-ack)
+
+`event.republish()` confirm-publishes a copy of the delivery to an exchange, and **only then** acks
+the original. If the publish fails, the original is nack-requeued and the promise rejects. If the
+process dies at any point before the ack, the broker redelivers the original. The library never
+sleeps; express delays with TTL queues you own.
+
+The copy keeps the same body. Properties and headers are merged over the original's. `mandatory`
+defaults to `true`, so an unbound retry route can't silently drop the copy. `userId` is dropped,
+because the broker would refuse it on another user's connection.
 
 ```ts
-client.sendMessage({
-  queue: 'emails',
-  data: { to: 'user@example.com', body: 'Hello' },
-  publishOptions: {
-    contentType: 'application/json',
-    persistent: true
+client.onQueue('orders.q').handleAll(async (event) => {
+  try {
+    await processOrder(event.data);
+    event.ack();
+  } catch (error) {
+    const attempt = Number(event.message.properties.headers?.['x-retry-count'] ?? 0);
+    if (attempt < 3) {
+      await event.republish({
+        exchange: 'orders.retry',                       // routes to a TTL queue that dead-letters back
+        routingKey: `${event.queue}.retry.${[1, 5, 30][attempt]}s`,
+        headers: { 'x-retry-count': attempt + 1 },
+      });
+    } else {
+      await event.republish({
+        exchange: 'dlx',
+        routingKey: event.queue,
+        headers: { 'x-error': String(error) },
+      });
+    }
   }
 });
 ```
 
-### Publish to an exchange
+The retry topology is yours. For example, `orders.q.retry.5s` is declared with
+`x-message-ttl: 5000`, `x-dead-letter-exchange: ''` and
+`x-dead-letter-routing-key: 'orders.q'`, and bound to `orders.retry`.
+
+`client.republish(message, options)` does the same with a raw `ConsumeMessage`.
+
+### Deprecated helpers
+
+`retryMessage()`, `deadLetter()` and `handleMessageError()` still work and return promises. They
+now publish the copy first and ack the original after it is confirmed; they never nack before the
+copy exists. Their optional delays (`delayMs`, `retryDelayMs`) are waited in-process with the
+original still unacked, which is crash-safe but holds a prefetch slot. Prefer `republish()` with
+TTL queues.
+
+`setupDeadLetterQueue()` declares a DLX/DLQ pair and requires `configure` permission.
+
+## Lifecycle, readiness and shutdown
 
 ```ts
-client.publishEvent({
-  exchange: 'app.events',
-  routingKey: 'user.created',
-  data: { id: '123', name: 'Ada' },
-  publishOptions: {
-    contentType: 'application/json',
-    type: 'USER_CREATED',
-    persistent: true
-  }
+client.state;            // 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closing' | 'closed'
+client.state$.subscribe((state) => metrics.gauge('rabbitmq_state', state));
+client.errors$.subscribe((event) => logger.warn({ event }, 'rabbitmq'));
+
+// readiness probe: connected, both channels open, every subscribed queue being consumed
+app.get('/ready', (_req, res) => res.sendStatus(client.state === 'ready' ? 200 : 503));
+
+process.once('SIGTERM', async () => {
+  await client.close({ drainTimeoutMs: 20_000 });
+  process.exit(0);
 });
 ```
 
-## Request/reply pattern
+- `ready` means the connection and both channels are open and every queue with subscribers (and
+  not stopped) has an active consumer. Any connection failure, channel failure (404/406/403), or
+  server-side `basic.cancel` (e.g. the queue was deleted) moves the client to `reconnecting` and
+  emits on `errors$`. The client then recreates whatever is missing, with exponential backoff
+  (`retryDelay` doubling up to `maxRetryDelay`).
+- `retryAttempts` bounds the initial-connect retries and the number of consecutive recovery
+  attempts. `0` means no initial retry and unlimited recovery.
+- `stopConsuming(queue?)` cancels consumers and resolves when the broker confirms. It stays in
+  effect across reconnects until `startConsuming(queue?)`.
+- `close({ drainTimeoutMs })` (default `drainTimeoutMs` 10 s) works in this order:
+  1. Cancel all consumers.
+  2. Wait for in-flight deliveries to be acked, nacked or republished, and for promises returned
+     by `handleAll`, `onEvent` or callback handlers to settle.
+  3. Wait for outstanding publisher confirms.
+  4. Close the channels and the connection.
+
+  Handlers can still ack and publish while draining. **No reconnect is ever scheduled from
+  `closing` or `closed`.**
+
+`errors$` event types:
+
+| Event | Meaning |
+|---|---|
+| `connection-error`, `connection-closed` | Connection failed or closed |
+| `channel-error`, `channel-closed` | `channel` is `'consume'` or `'publish'` |
+| `consumer-cancelled` | The broker sent `basic.cancel` for a consumer |
+| `init-failed` | Automatic `init()` from the constructor failed |
+| `recovery-failed`, `recovery-exhausted` | A recovery attempt failed, or attempts ran out |
+| `message-returned` | Uncorrelated return (unconfirmed mode) |
+| `handler-error` | A callback handler failed, or a message could not be deserialized |
+| `hook-error` | An `onPublish` or `onDeliver` hook threw |
+
+## Observability
+
+### Hooks
+
+Hooks let you inject and extract trace context (e.g. W3C `traceparent`) without the library
+depending on OpenTelemetry:
+
+```ts
+new RabbitMQClient({
+  // ...
+  hooks: {
+    onPublish: (properties, { exchange, routingKey }) => {
+      properties.headers.traceparent = currentTraceparent(); // headers is always present
+    },
+    onDeliver: (event) => {
+      startSpanFrom(event.message.properties.headers?.traceparent, { queue: event.queue });
+    },
+  },
+});
+```
+
+Hooks run synchronously. A throwing hook is reported on `errors$` and doesn't fail the publish or
+the delivery.
+
+### Metrics
+
+With `metrics: true`, `client.getMetrics()` returns the following counters:
+
+- `messagesReceived`, `messagesPublished`, `messagesAcked`, `messagesNacked`, `messagesRetried`
+- `rpcRequests`, `rpcResponses`
+- `reconnects`, `channelRecreated`
+- `publishConfirmed`, `publishNacked`, `publishReturned`
+
+### Logger
+
+```ts
+logger: {
+  debug: (...args) => log.debug(args),
+  info: (...args) => log.info(args),
+  warn: (...args) => log.warn(args),
+  error: (...args) => log.error(args),
+}
+```
+
+## Request/reply
 
 ```ts
 const response = await client.sendRequest<{ ok: boolean }>({
   queue: 'worker',
   data: { action: 'generate-report' },
-  publishOptions: {
-    correlationId: 'req-123',
-    contentType: 'application/json',
-    type: 'GENERATE_REPORT'
-  }
+  publishOptions: { contentType: 'application/json', type: 'GENERATE_REPORT' },
 }, true, 30000);
-
-console.log(response.data);
 ```
 
-The request helper creates a temporary exclusive reply queue and watches for a matching correlation ID. If a reply is not received before the timeout, the promise rejects and the temporary consumer is cancelled.
-
-## Message acknowledgement and recovery
-
-The event object includes helper methods:
-
-```ts
-client.onQueue('emails').handle('SEND_EMAIL').subscribe({
-  next: (event) => {
-    // ack once business logic succeeds
-    event.ack();
-
-    // or reject and requeue if necessary
-    client.nack(event.message, true);
-  }
-});
-```
-
-### Retry and dead-letter helpers
-
-```ts
-client.onQueue('emails').handle('SEND_EMAIL').subscribe({
-  next: (event) => {
-    try {
-      // business logic
-    } catch (error) {
-      client.retryMessage(event.message, {
-        delayMs: 1000,
-        requeue: true,
-        queue: 'emails.retry'
-      });
-    }
-  }
-});
-```
-
-```ts
-client.deadLetter(event.message, 'processing failed', 'emails.dlq');
-```
-
-These helpers are intentionally opt-in and explicit; they avoid forcing a policy onto all consumers.
-
-You can also call these operations directly from the event object, without retaining or passing the client instance:
-
-```ts
-client.onQueue('emails').handle('SEND_EMAIL').subscribe({
-  next: (event) => {
-    try {
-      // process message
-      event.ack();
-    } catch (error) {
-      event.nack(false);
-
-      event.retry({
-        delayMs: 2000,
-        requeue: false,
-        queue: 'emails.retry'
-      });
-
-      const result = event.handlerError(error, {
-        reason: 'email processing failed',
-        deadLetterQueue: 'emails.dlq',
-        requeue: false
-      });
-
-      console.log(result.action);
-    }
-  }
-});
-```
-
-The event convenience methods are:
-
-- `event.nack(requeue?)`: reject the current message
-- `event.retry(options?)`: retry through a queue or delay
-- `event.handlerError(error, options?)`: apply centralized retry, DLQ, or nack handling
-
-Each method wraps the corresponding client method and captures the event’s `ConsumeMessage`, so consumer callbacks do not need to reference the client object.
-
-### Dead-letter queue setup and centralized error handling
-
-For production workloads, it is often easier to define the DLQ topology once and then route failures through a single helper.
-
-```ts
-await client.setupDeadLetterQueue({
-  sourceQueue: 'emails',
-  deadLetterQueue: 'emails.dlq',
-  deadLetterExchange: 'emails.dlx',
-  deadLetterRoutingKey: 'emails.dlq',
-  queueOptions: { durable: true },
-  deadLetterQueueOptions: { durable: true },
-  messageTtlMs: 5000
-});
-```
-
-This config creates a dead-letter exchange and binds it to a dedicated DLQ, while also attaching the DLX metadata to the source queue so RabbitMQ can move failed work automatically.
-
-For handling processing failures inside a consumer, prefer a centralized helper rather than duplicating retry logic in each handler:
-
-```ts
-client.onQueue('emails').handle('SEND_EMAIL').subscribe({
-  next: (event) => {
-    try {
-      // process message
-      event.ack();
-    } catch (error) {
-      client.handleMessageError(event.message, error, {
-        reason: 'email processing failed',
-        deadLetterQueue: 'emails.dlq',
-        retryQueue: 'emails.retry',
-        retryDelayMs: 2000,
-        requeue: false
-      });
-    }
-  }
-});
-```
-
-The helper returns an action summary and keeps the failure policy explicit:
-
-- `retry`: requeue the message to a retry queue after a delay
-- `dead-letter`: move the message into the configured DLQ
-- `nack`: reject the message and optionally requeue it
-
-This makes it easier to keep error handling consistent across queues without burying RabbitMQ semantics deep inside business logic.
+The request is sent with a confirm, and the reply is awaited on a temporary exclusive queue. If no
+reply arrives before the timeout, the promise rejects.
 
 ## Serialization
 
-The library includes a built-in serializer registry in `SERIALIZERS` and supports custom registration.
-
-Serializer configuration can also be scoped to one client instance:
+Incoming messages are deserialized by `message.properties.contentType`, falling back to
+`defaultContentType`. Outgoing data is serialized by `publishOptions.contentType`. Built-in
+serializers cover `application/json`, `text/plain` and `application/octet-stream`. Instance
+serializers take precedence over the global registry.
 
 ```ts
-const client = new RabbitMQClient({
-  connection_url: process.env.RABBITMQ_URL!,
+new RabbitMQClient({
+  // ...
   defaultContentType: 'application/custom+json',
   serializers: {
     'application/custom+json': {
       serialize: (value) => Buffer.from(JSON.stringify(value)),
-      deserialize: (buffer) => JSON.parse(buffer.toString('utf8'))
-    }
+      deserialize: (buffer) => JSON.parse(buffer.toString('utf8')),
+    },
   },
-  queues: [],
-  exchanges: [],
-  bindings: [],
-  retryAttempts: 3,
-  retryDelay: 1000
 });
+
+registerSerializer('application/custom', { serialize, deserialize });            // global
+RabbitMQClient.registerSerializer('application/custom', { serialize, deserialize });
 ```
 
-Instance serializers take precedence over the global registry. Incoming messages are deserialized automatically from `message.properties.contentType`; if that property is missing, `defaultContentType` is used.
-
-Global custom registration remains available for backwards compatibility:
-
-```ts
-import { registerSerializer } from 'rxjs-rabbitmq';
-
-registerSerializer('application/custom', {
-  serialize: (value) => Buffer.from(JSON.stringify(value)),
-  deserialize: (buffer) => JSON.parse(buffer.toString('utf8'))
-});
-```
-
-You can also call:
-
-```ts
-RabbitMQClient.registerSerializer('application/custom', {
-  serialize: ...,
-  deserialize: ...
-});
-```
-
-## Metrics and observability
-
-When `metrics: true` is enabled, the client tracks counts for:
-
-- received messages
-- published messages
-- acked messages
-- nacked messages
-- retried messages
-- RPC requests
-- RPC responses
-- reconnects
-
-```ts
-const client = new RabbitMQClient({
-  connection_url: process.env.RABBITMQ_URL!,
-  metrics: true,
-  queues: [],
-  exchanges: [],
-  bindings: [],
-  retryAttempts: 2,
-  retryDelay: 1000
-});
-
-console.log(client.getMetrics());
-```
-
-This is useful for diagnostics and operational visibility, but it remains optional and should not be enabled unless you want the extra bookkeeping.
-
-## Logger configuration
-
-Logs are optional and fully configurable.
-
-```ts
-const client = new RabbitMQClient({
-  connection_url: process.env.RABBITMQ_URL!,
-  logger: {
-    debug: (...args) => console.debug('[rabbitmq]', ...args),
-    info: (...args) => console.info('[rabbitmq]', ...args),
-    warn: (...args) => console.warn('[rabbitmq]', ...args),
-    error: (...args) => console.error('[rabbitmq]', ...args)
-  },
-  queues: [],
-  exchanges: [],
-  bindings: [],
-  retryAttempts: 3,
-  retryDelay: 2000
-});
-```
-
-This is especially helpful in production, where per-message logs can become a throughput bottleneck.
-
-## Lifecycle management
-
-The client exposes a manual close method for clean shutdown:
-
-```ts
-await client.close();
-```
-
-This clears any reconnect timer, closes the channel and connection, and marks the client as no longer ready.
-
-## Full example
-
-```ts
-import {
-  RabbitMQClient,
-  RmqEventMessage,
-  ContentTypes
-} from 'rxjs-rabbitmq';
-
-const client = new RabbitMQClient({
-  connection_url: process.env.RABBITMQ_URL!,
-  delayStart: 1500,
-  prefetch: 25,
-  retryAttempts: 3,
-  retryDelay: 2000,
-  rpcRequestTimeoutMs: 30000,
-  metrics: true,
-  autoAckUnhandledMessageTypes: true,
-  logger: {
-    info: (...args) => console.info('[rmq]', ...args),
-    warn: (...args) => console.warn('[rmq]', ...args),
-    error: (...args) => console.error('[rmq]', ...args)
-  },
-  queues: [
-    {
-      name: 'emails',
-      handleMessageTypes: ['SEND_EMAIL', 'EMAIL_SENT'],
-      options: { durable: true }
-    }
-  ],
-  exchanges: [
-    {
-      name: 'app.events',
-      type: 'fanout',
-      options: { durable: true }
-    }
-  ],
-  bindings: [
-    {
-      queue: 'emails',
-      exchange: 'app.events',
-      routingKey: '#'
-    }
-  ]
-});
-
-const emailsQueue = client.onQueue('emails');
-
-emailsQueue.handle('SEND_EMAIL').subscribe({
-  next: async (event: RmqEventMessage) => {
-    try {
-      const payload = event.data as { to: string; subject: string; html: string };
-      console.log('Sending email', payload);
-      event.ack();
-      client.publishEvent({
-        exchange: 'app.events',
-        routingKey: 'email.sent',
-        data: { ok: true, to: payload.to },
-        publishOptions: {
-          type: 'EMAIL_SENT',
-          contentType: ContentTypes.JSON,
-          persistent: true
-        }
-      });
-    } catch (error) {
-      client.deadLetter(event.message, 'email send failed', 'emails.dlq');
-    }
-  }
-});
-
-process.on('SIGINT', async () => {
-  await client.close();
-  process.exit(0);
-});
-```
-
-## Design goals and trade-offs
-
-This package intentionally favors simplicity over abstraction. It does not hide RabbitMQ details completely, and it does not force a specific application-level architecture. Instead, it gives you:
-
-- a direct client
-- RxJS streams
-- explicit message acknowledgement
-- configurable production defaults
-- small extension points for serializers, retries, and metrics
-
-That makes it easy to reason about and safe to use in microservice environments without introducing lots of hidden behavior.
-
-## Stability guidance
-
-The same library should remain stable if you follow a few rules:
-
-- keep message types explicit
-- prefer `ack()` only after successful processing
-- use `nack()` and `retryMessage()` only when you own the retry strategy
-- use `logger` and `metrics` as opt-in production controls
-- do not rely on implicit routing behavior for critical workflows
-
-## Contributing
-
-This project is intentionally small. Improvements are most welcome when they:
-
-- reduce operational risk
-- improve RxJS ergonomics
-- maintain a simple public API
-- do not quietly introduce opinionated infrastructure behavior
-
-## License
-
-ISC
-
-## Support
-
-This package assumes you already understand RabbitMQ semantics and the application-level contract around your queues, exchanges, and routing keys.
+A message that fails to deserialize is rejected without requeue (it dead-letters if the queue has
+a DLX) and reported on `errors$`.
 
 ## Compile-time resource and payload typing
 
-The client can be parameterized with literal resource names and a payload map. This rejects unknown queues, exchanges, routing keys, and message types at compile time and infers payload types in handlers.
-
 ```ts
-import { RabbitMQClient } from 'rxjs-rabbitmq';
-
 type EmailPayloads = {
   SEND_EMAIL: { to: string; subject: string };
   EMAIL_SENT: { ok: boolean };
 };
 
 const client = new RabbitMQClient<
-  'emails' | 'jobs',
-  'app.events',
-  '#' | 'email.sent',
-  'SEND_EMAIL' | 'EMAIL_SENT',
-  EmailPayloads
+  'emails' | 'jobs',                              // QueueName
+  'app.events' | 'app.retry',                     // ExchangeName
+  '#' | 'email.sent' | `${string}.retry.${string}`, // RoutingKey
+  'SEND_EMAIL' | 'EMAIL_SENT',                    // MessageName
+  EmailPayloads                                   // TPayloadMap
 >({
   connection_url: process.env.RABBITMQ_URL!,
-  retryAttempts: 3,
-  retryDelay: 1000,
   queues: [{
     name: 'emails',
     handleMessageTypes: [{
       messageName: 'SEND_EMAIL',
-      callbackHandler: (event) => {
-        const recipient: string = event.data.to;
-        void recipient;
-      }
-    }]
+      callbackHandler: (event) => { const to: string = event.data.to; },  // narrowed per messageName
+    }],
   }],
-  exchanges: [{ name: 'app.events', type: 'fanout' }],
-  bindings: [{ queue: 'emails', exchange: 'app.events', routingKey: '#' }]
 });
 
 client.onQueue('emails').handle('SEND_EMAIL').subscribe((event) => {
   const recipient: string = event.data.to;
-  void recipient;
-});
-
-client.onQueue('emails').onEvent('EMAIL_SENT', (event) => {
-  const success: boolean = event.data.ok;
-  void success;
-});
-
-client.publishEvent({
-  exchange: 'app.events',
-  routingKey: 'email.sent',
-  data: { ok: true },
-  publishOptions: { contentType: 'application/json' }
 });
 
 // Compile-time errors:
 // client.onQueue('unknown');
 // client.onQueue('emails').handle('UNKNOWN_EVENT');
 // client.publishEvent({ exchange: 'unknown.exchange', data: {}, publishOptions: {} });
-// client.publishEvent({ exchange: 'app.events', routingKey: 'unknown.route', data: {}, publishOptions: {} });
 ```
 
-The five generic parameters are:
+All generics default to `string` or `unknown`. The declarations type-check under `strict`,
+`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess` and `verbatimModuleSyntax`
+(TypeScript 5.9 and 6.0).
 
-1. `QueueName` — known queue names
-2. `ExchangeName` — known exchange names
-3. `RoutingKey` — known routing keys
-4. `MessageName` — known `message.properties.type` values
-5. `TPayloadMap` — payload types keyed by message name
+## Configuration reference
 
-All generics default to `string` or `unknown`, so existing non-generic usage remains compatible.
+| Option | Default | |
+|---|---|---|
+| `connection_url` | required | URL string or amqplib `Options.Connect` |
+| `socketOptions` | | Passed to `amqplib.connect` (TLS, `clientProperties.connection_name`) |
+| `topology` | `'declare'` | `'declare' \| 'verify' \| 'none'` |
+| `confirm` | `true` | Use a confirm channel for publishing |
+| `prefetch` | | `basic.qos` on the consume channel |
+| `readyTimeoutMs` | `10000` | How long a publish waits for readiness |
+| `drainTimeoutMs` | `10000` | Default for `close()` |
+| `retryAttempts` | `0` | Initial retries; maximum consecutive recovery attempts (`0` retries forever) |
+| `retryDelay` / `maxRetryDelay` | `1000` / `30000` | Exponential backoff bounds |
+| `unhandledMessages` | `'nack-requeue'` | See [Message types](#message-types) |
+| `hooks` | | `onPublish`, `onDeliver` |
+| `publishChannelOptions` | | e.g. `{ highWaterMark }` |
+| `metrics`, `logger`, `serializers`, `defaultContentType` | | |
+| `queues` / `exchanges` / `bindings` | `[]` | Topology used by `'declare'` and `'verify'` |
+| `stopAutoInit` | `false` | Call `init()` yourself |
+| `delayStart`, `pre_init_promises`, `post_init_promises`, `rpcRequestTimeoutMs` | | |
+| `connect` | `amqplib.connect` | Replace the connect function (tests, custom transports) |
+
+## Development
+
+```bash
+npm run lint               # Biome
+npm run typecheck          # TS 5.9: library + strict CJS/ESM consumer projects
+npm run typecheck:ts6      # same with TypeScript 6.0
+npm test                   # build + unit tests + ESM smoke test
+npm run test:integration   # RabbitMQ 4 via Testcontainers (Docker required)
+npm run test:slow          # 100k-message memory test
+```
+
+Integration tests start `rabbitmq:4-management` with Testcontainers. To use an existing broker
+instead, set `RABBITMQ_AMQP_URL` and `RABBITMQ_MGMT_URL` with admin credentials in both.
+
+## License
+
+ISC

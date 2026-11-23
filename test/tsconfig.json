@@ -1,0 +1,19 @@
+{
+  // Type-checks the *published* declarations (resolved through package.json "exports")
+  // under the strictest consumer settings. Run after `npm run build`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "skipLibCheck": false,
+    "noEmit": true
+  },
+  "files": ["typing.test.ts"],
+  "references": []
+}

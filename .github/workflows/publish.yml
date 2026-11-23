@@ -1,0 +1,62 @@
+name: Publish (staged)
+
+# Stages the release on npm through trusted publishing (OIDC). Staging needs no token and
+# no 2FA; the version stays private until a maintainer approves it:
+#   npm stage list rxjs-rabbitmq
+#   npm stage download <stage-id>   # optional: inspect the tarball
+#   npm stage approve <stage-id>    # prompts for 2FA, then publishes
+#   npm stage reject <stage-id>     # discard it instead
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # OIDC trusted publishing + provenance
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # `npm stage` ships with npm 12 (requires Node ^22.22.2 || ^24.15.0 || >=26)
+      - run: npm install -g npm@^12.2.3
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run typecheck:ts6
+      - run: npm run test:integration
+
+      - name: Check the release tag matches package.json
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - name: Pick dist-tag
+        id: dist_tag
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          case "$version" in
+            *-*) tag="${version#*-}"; echo "tag=${tag%%.*}" >> "$GITHUB_OUTPUT" ;; # 3.1.0-beta.2 -> beta
+            *)   echo "tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Stage publish
+        run: npm stage publish --provenance --access public --tag "${{ steps.dist_tag.outputs.tag }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Staged \`$(node -p "require('./package.json').name + '@' + require('./package.json').version")\` (dist-tag \`${{ steps.dist_tag.outputs.tag }}\`)"
+            echo
+            echo 'Approve with `npm stage list rxjs-rabbitmq` then `npm stage approve <stage-id>` (2FA).'
+          } >> "$GITHUB_STEP_SUMMARY"

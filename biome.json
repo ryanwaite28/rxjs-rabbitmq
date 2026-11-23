@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "src/**",
+      "test/**",
+      "scripts/**",
+      "!dist/**"
+    ]
+  },
+  "formatter": {
+    "enabled": false
+  },
+  "assist": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        "noRedundantUseStrict": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "src/enums.ts"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noDuplicateEnumValues": "off"
+          }
+        }
+      }
+    }
+  ]
+}
