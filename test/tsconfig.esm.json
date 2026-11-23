@@ -1,0 +1,8 @@
+{
+  // ESM consumer (`"type": "module"`-style .mts files) with verbatimModuleSyntax.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "verbatimModuleSyntax": true
+  },
+  "files": ["types/esm-consumer.mts"]
+}

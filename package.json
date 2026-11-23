@@ -1,29 +1,61 @@
 {
   "name": "rxjs-rabbitmq",
-  "version": "2.2.3",
+  "version": "3.0.0",
   "description": "RxJS powered RabbitMQ event handling",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "deprecated": false,
+  "main": "./dist/cjs/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.mts",
+        "default": "./dist/esm/index.mjs"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
   "homepage": "https://github.com/ryanwaite28/rxjs-rabbitmq",
   "scripts": {
-    "tsc": "tsc",
-    "build": "tsc",
-    "prepublish": "tsc",
-    "test": "npm run build && node --test test/*.test.js"
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/build-esm.cjs",
+    "prepare": "npm run build",
+    "lint": "biome lint src test scripts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p test/tsconfig.json && tsc -p test/tsconfig.esm.json",
+    "typecheck:ts6": "node node_modules/typescript-6/bin/tsc -p tsconfig.json --noEmit && node node_modules/typescript-6/bin/tsc -p test/tsconfig.json && node node_modules/typescript-6/bin/tsc -p test/tsconfig.esm.json",
+    "test": "npm run build && npm run test:unit",
+    "test:unit": "node --test test/unit/*.test.js test/esm-smoke.test.mjs",
+    "test:integration": "npm run build && node --test --test-concurrency=1 --test-timeout=180000 test/integration/*.test.js",
+    "test:slow": "npm run build && node --expose-gc --test --test-timeout=600000 test/slow/*.test.js",
+    "test:packed": "npm run build && node scripts/smoke-packed.mjs",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test"
   },
   "author": "Ryan M. Waite",
   "license": "ISC",
-  "devDependencies": {
-    "@types/amqplib": "^0.10.1",
-    "@types/node": "^20.6.2",
-    "tslint": "^6.1.3",
-    "typescript": "^5.2.2"
+  "peerDependencies": {
+    "amqplib": "^2.4.0",
+    "rxjs": "^7.8.2"
   },
-  "dependencies": {
-    "amqplib": "^0.10.3",
-    "rxjs": "^7.8.1",
-    "uuid": "^9.0.1"
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
+    "@types/node": "^20.19.43",
+    "amqplib": "^2.4.0",
+    "rxjs": "^7.8.2",
+    "testcontainers": "^12.2.2",
+    "typescript": "~5.9.3",
+    "typescript-6": "npm:typescript@~6.0.3"
   },
   "keywords": [
     "RxJS",
@@ -33,5 +65,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ryanwaite28/rxjs-rabbitmq.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
